@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input with context %}
+{% block title %}DNS filtering{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>DNS filtering</h1><p>AdGuard Home on {{ cfg.server_ip }} — reachable only from the VPN. Every device is identified by its static VPN address.</p></div>
+</div>
+{% if err %}<div class="flash error">AdGuard Home is not reachable: {{ err }}</div>{% endif %}
+
+<div class="grid g4">
+  <div class="card stat"><div class="label">Resolver</div>
+    <div class="value">{% if ag.running %}<span class="badge b-good">Running</span>{% else %}<span class="badge b-bad">Down</span>{% endif %}</div>
+    <div class="sub">{{ ag.version }} · protection {{ 'on' if ag.protection_enabled else 'OFF' }}</div></div>
+  <div class="card stat"><div class="label">Queries (7 days)</div><div class="value">{{ '{:,}'.format(stats.num_dns_queries or 0) }}</div>
+    <div class="sub">avg {{ '%.1f'|format((stats.avg_processing_time or 0) * 1000) }} ms</div></div>
+  <div class="card stat"><div class="label">Blocked by lists</div><div class="value">{{ '{:,}'.format(stats.num_blocked_filtering or 0) }}</div>
+    <div class="sub">{% if stats.num_dns_queries %}{{ '%.1f'|format(100 * (stats.num_blocked_filtering or 0) / stats.num_dns_queries) }}% of queries{% endif %}</div></div>
+  <div class="card stat"><div class="label">Malware / parental</div>
+    <div class="value">{{ (stats.num_replaced_safebrowsing or 0) + (stats.num_replaced_parental or 0) }}</div>
+    <div class="sub">{{ stats.num_replaced_safebrowsing or 0 }} malware · {{ stats.num_replaced_parental or 0 }} adult</div></div>
+</div>
+
+<div class="grid g2">
+  <div class="card">
+    <h2>Filter lists</h2>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>List</th><th class="num">Rules</th><th class="num hide-sm">Updated</th></tr></thead>
+      <tbody>
+      {% for f in fstatus.filters or [] %}
+        <tr><td class="small">{{ f.name }}{% if not f.enabled %} <span class="badge plain">off</span>{% endif %}</td>
+            <td class="num small">{{ '{:,}'.format(f.rules_count or 0) }}</td>
+            <td class="num small hide-sm">{{ f.last_updated|ago if f.last_updated else '—' }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <h3 class="cat-head">Category lists → devices</h3>
+    <ul class="list-plain small">
+      {% for cat, info in cats.items() %}
+      <li><span>{{ info[0] }} <span class="muted">({{ info[1] }})</span></span>
+          <span>{% for ip in lists[cat] %}{% set rr = by_ip.get(ip) %}<span class="badge plain">{{ rr.d.display_name if rr else ip }}</span> {% else %}<span class="muted">no devices</span>{% endfor %}</span></li>
+      {% endfor %}
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Test a domain</h2>
+    <form method="post" action="/dns/check">
+      {{ csrf_input() }}
+      <div class="row">
+        <div class="field"><label for="dom">Domain</label><input id="dom" type="text" name="domain" required placeholder="blocked-site.example" autocapitalize="none" spellcheck="false"></div>
+        <div class="field"><label for="dev">As device</label>
+          <select id="dev" name="device_id"><option value="">Global rules only</option>
+            {% for r in rows %}<option value="{{ r.d.id }}" {{ 'selected' if sel and sel.d.id == r.d.id }}>{{ r.m.name }} — {{ r.d.display_name }} ({{ r.p.name }})</option>{% endfor %}
+          </select></div>
+      </div>
+      <button class="btn" type="submit">Check</button>
+    </form>
+    <hr class="sep">
+    <h2>Global blocklist</h2>
+    <p class="small muted">Blocked for every device, adults included. Per-policy lists live on each policy.</p>
+    <form method="post" action="/dns/rules">
+      {{ csrf_input() }}
+      <textarea name="global_custom_rules" placeholder="one domain per line">{{ global_rules }}</textarea>
+      <button class="btn primary" type="submit">Save</button>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-head"><h2>Query log</h2><span class="muted small">domain names only · kept 7 days</span></div>
+  <form method="get" action="/dns" class="table-tools">
+    <select name="device" aria-label="Device" data-autosubmit>
+      <option value="0">All devices</option>
+      {% for r in rows %}<option value="{{ r.d.id }}" {{ 'selected' if sel and sel.d.id == r.d.id }}>{{ r.m.name }} — {{ r.d.display_name }}</option>{% endfor %}
+    </select>
+    <div class="search"><svg><use href="#i-search"/></svg><input type="search" name="q" value="{{ q }}" placeholder="Filter by domain…"></div>
+    <label class="check inline-check"><input type="checkbox" name="blocked" value="1" {{ 'checked' if blocked }}> <span>Blocked only</span></label>
+    <button class="btn sm" type="submit">Apply</button>
+  </form>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Time</th><th>Device</th><th>Domain</th><th>Result</th><th class="hide-sm">Rule</th></tr></thead>
+    <tbody>
+    {% for e in log %}
+      {% set rr = by_ip.get(e.client) %}
+      {% set is_blocked = e.reason.startswith('Filtered') and e.reason != 'FilteredSafeSearch' %}
+      <tr>
+        <td class="small nowrap">{{ e.time|dt('%m-%d %H:%M:%S') }}</td>
+        <td class="small">{% if rr %}<a href="/devices/{{ rr.d.id }}">{{ rr.d.display_name }}</a><div class="cell-sub">{{ rr.m.name }}</div>{% else %}<span class="mono">{{ e.client }}</span>{% endif %}</td>
+        <td class="mono small">{{ e.question.name }}</td>
+        <td>{% if is_blocked %}<span class="badge b-bad">{{ {'FilteredParental': 'Adult', 'FilteredSafeBrowsing': 'Malware', 'FilteredBlockedService': 'Service'}.get(e.reason, 'Blocked') }}</span>
+            {% elif e.reason == 'FilteredSafeSearch' %}<span class="badge b-info">SafeSearch</span>
+            {% elif e.reason == 'NotFilteredAllowList' %}<span class="badge b-good">Allowed</span>
+            {% else %}<span class="badge plain">OK</span>{% endif %}</td>
+        <td class="mono small hide-sm">{{ (e.rules or [{}])[0].get('text', '')[:60] }}{{ e.service_name or '' }}</td>
+      </tr>
+    {% else %}<tr class="empty-row"><td colspan="5" class="empty">No queries match.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input, type_badge, avatar, device_status, internet_badge with context %}
+{% block title %}{{ m.name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div class="who-head">
+    <p class="small"><a href="/members">← Family members</a></p>
+    <h1>{{ m.name }}</h1>
+    <div class="chips">{{ type_badge(m.type) }}<span class="badge plain">{{ policy.name }}</span>{% if not m.enabled %}<span class="badge b-warn">Paused — all devices blocked</span>{% endif %}</div>
+  </div>
+  <div class="actions">
+    <a class="btn primary" href="/devices/new?member={{ m.id }}"><svg><use href="#i-plus"/></svg>Add device</a>
+    {% if m.type != 'ADULT' or sched.windows %}<a class="btn" href="/schedules/{{ m.id }}"><svg><use href="#i-clock"/></svg>Schedule</a>{% endif %}
+    <form method="post" action="/members/{{ m.id }}/enabled" class="inline"
+          data-confirm="{{ 'Re-enable all of ' ~ m.name ~ '’s devices?' if not m.enabled else 'Pause ' ~ m.name ~ '? All their devices are disconnected and cannot connect until you resume.' }}"
+          data-confirm-ok="{{ 'Resume' if not m.enabled else 'Pause' }}" data-confirm-danger="{{ '0' if not m.enabled else '1' }}">
+      {{ csrf_input() }}<button class="btn {{ '' if not m.enabled else 'danger' }}" type="submit">{{ 'Resume' if not m.enabled else 'Pause member' }}</button>
+    </form>
+  </div>
+</div>
+
+{% if sched.windows or sched.override %}
+<div class="callout {{ 'warn' if not sched.allowed }}">
+  Internet right now: <b>{{ 'allowed' if sched.allowed else 'blocked' }}</b> — {{ sched.reason }}.
+  {% if sched.next_change %}Changes {{ sched.next_change|ago }} ({{ sched.next_change|dt('%a %H:%M') }}).{% endif %}
+  <a href="/schedules/{{ m.id }}">Manage schedule →</a>
+</div>
+{% endif %}
+
+<div class="grid g-2-1">
+  <div class="card">
+    <div class="card-head"><h2>Devices</h2><span class="muted small">{{ rows|selectattr('status', 'ne', 'revoked')|list|length }} active · usage this month</span></div>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Device</th><th>Status</th><th class="hide-sm">Internet</th><th class="hide-sm">VPN IP</th><th class="num">This month</th></tr></thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td><a class="cell-title" href="/devices/{{ r.d.id }}">{{ r.d.display_name }}</a><div class="cell-sub mono">{{ r.d.common_name }}</div></td>
+          <td>{{ device_status(r) }}</td>
+          <td class="hide-sm">{{ internet_badge(r) }}</td>
+          <td class="hide-sm mono">{{ r.d.vpn_ipv4 }}</td>
+          <td class="num">{{ usage[r.d.id].total|bytes }}</td>
+        </tr>
+      {% else %}
+        <tr class="empty-row"><td colspan="5" class="empty">No devices yet. <a href="/devices/new?member={{ m.id }}">Create the first VPN profile</a>.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Edit</h2>
+    <form method="post" action="/members/{{ m.id }}">
+      {{ csrf_input() }}
+      <div class="field"><label for="n">Name</label><input id="n" type="text" name="name" value="{{ m.name }}" maxlength="60" required></div>
+      <div class="field"><label for="t">Type</label>
+        <select id="t" name="type">
+          {% for t, l in [('ADULT','Adult'),('CHILD','Child'),('GUEST','Guest')] %}<option value="{{ t }}" {{ 'selected' if m.type == t }}>{{ l }}</option>{% endfor %}
+        </select></div>
+      <div class="field"><label for="p">Policy for all devices</label>
+        <select id="p" name="policy_id">
+          {% for p in policies %}<option value="{{ p.id }}" {{ 'selected' if p.id == m.policy_id }}>{{ p.name }}</option>{% endfor %}
+        </select>
+        <div class="hint">Individual devices can override this on their own page.</div></div>
+      <div class="field"><label for="no">Notes</label><input id="no" type="text" name="notes" value="{{ m.notes }}" maxlength="500"></div>
+      <button class="btn primary" type="submit">Save</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

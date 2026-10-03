@@ -1,0 +1,24 @@
+[Unit]
+Description=Family VPN Panel (FastAPI, loopback only)
+After=network-online.target openvpn-server@server.service adguardhome.service vpnpanel-nft.service
+Wants=network-online.target
+
+[Service]
+User=vpnpanel
+Group=vpnpanel
+WorkingDirectory=/opt/vpnpanel
+EnvironmentFile=/etc/vpnpanel/panel.env
+ExecStart=/opt/vpnpanel/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port ${APP_PORT} --workers 1 \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1 --no-server-header --log-level warning
+Restart=on-failure
+RestartSec=3
+UMask=0077
+# The panel calls its root helper via sudo, so NoNewPrivileges/ProtectSystem
+# cannot be used here (the helper inherits this unit's mount namespace).
+PrivateTmp=yes
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

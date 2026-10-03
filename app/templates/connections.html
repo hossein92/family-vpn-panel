@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input, type_badge with context %}
+{% block title %}Connected clients{% endblock %}
+{% block bodyattrs %} data-autorefresh="15"{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Connected clients</h1><p>Live from the OpenVPN management interface · refreshes every 15 s</p></div>
+  <div class="actions"><button class="btn sm" id="pause-refresh" type="button">Pause auto-refresh</button></div>
+</div>
+{% if error %}<div class="flash error">Could not read OpenVPN status: {{ error }}</div>{% endif %}
+<div class="card">
+  <div class="card-head"><h2><span class="dot on"></span>&nbsp; {{ rows|length }} connected</h2></div>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Device</th><th>Owner</th><th class="hide-sm">Common name</th><th>VPN IP</th><th>Public source IP</th><th class="hide-sm">Connected since</th><th class="num">↓ To device</th><th class="num">↑ From device</th><th></th></tr></thead>
+    <tbody>
+    {% for c in rows %}
+      <tr>
+        <td>{% if c.dev %}<a class="cell-title" href="/devices/{{ c.dev.id }}">{{ c.dev.display_name }}</a>{% else %}<span class="badge b-warn">Unmanaged</span>{% endif %}</td>
+        <td>{% if c.dev %}{{ c.dev.owner }} {{ type_badge(c.dev.mtype) }}{% else %}—{% endif %}</td>
+        <td class="mono small hide-sm">{{ c.cn }}</td>
+        <td class="mono small">{{ c.vpn_ipv4 }}</td>
+        <td class="mono small">{{ c.real_address.rsplit(':', 1)[0] }}</td>
+        <td class="small hide-sm">{{ c.duration|duration }} ago</td>
+        <td class="num">{{ c.bytes_sent|bytes }}</td>
+        <td class="num">{{ c.bytes_received|bytes }}</td>
+        <td class="right">
+          <form method="post" action="/connections/{{ c.client_id }}/kill" class="inline" data-confirm="Disconnect {{ c.cn }}? Only this session is closed — the VPN keeps running for everyone else."
+                data-confirm-ok="Disconnect">{{ csrf_input() }}<button class="btn sm danger" type="submit">Disconnect</button></form>
+        </td>
+      </tr>
+    {% else %}<tr class="empty-row"><td colspan="9" class="empty">Nobody is connected right now.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+<p class="small muted">Disconnect sends a HALT to that client only. To keep a device off the VPN, disable it on its device page.</p>
+{% endblock %}

@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input with context %}
+{% block title %}Add device{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><p class="small"><a href="/devices">← Devices</a></p><h1>Add device</h1>
+    <p>Creates a unique certificate and private key for this one device and builds its .ovpn profile.</p></div>
+</div>
+{% if not members %}
+<div class="card empty"><p>Add a family member first.</p><a class="btn primary" href="/members">Family members</a></div>
+{% else %}
+<div class="grid g-2-1">
+<form class="card" method="post" action="/devices">
+  {{ csrf_input() }}
+  <div class="field"><label for="owner">Owner</label>
+    <select id="owner" name="member_id" required>
+      {% for m in members %}<option value="{{ m.id }}" {{ 'selected' if m.id == member_id }}>{{ m.name }} — {{ m.type|lower }} · {{ m.policy_name }}</option>{% endfor %}
+    </select></div>
+  <div class="field"><label for="dn">Device name</label>
+    <input id="dn" type="text" name="display_name" maxlength="80" required placeholder="e.g. iPhone, MacBook, iPad">
+    <div class="hint">The certificate common name is generated from owner + device (e.g. <code>alex-phone</code>).</div></div>
+  <div class="field"><label for="pol">Policy</label>
+    <select id="pol" name="policy_id">
+      <option value="">Inherit from owner (recommended)</option>
+      {% for p in policies %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+    </select></div>
+  <div class="row">
+    <div class="field"><label for="exp">Expires on <span class="muted">(optional)</span></label>
+      <input id="exp" type="date" name="expires_on">
+      <div class="hint">Guests default to {{ guest_days }} days. The certificate itself expires then, and the panel disables the device at 23:59 ({{ tz }}).</div></div>
+    <div class="field"><label for="cn">Common name <span class="muted">(optional)</span></label>
+      <input id="cn" type="text" name="common_name" pattern="[a-z0-9][a-z0-9\-]{1,62}" placeholder="auto" autocapitalize="none" spellcheck="false">
+      <div class="hint">Lowercase letters, digits, dashes.</div></div>
+  </div>
+  <label class="check"><input type="checkbox" name="panel_access">
+    <div><b>May open this admin panel</b><span>Only for adults’ devices. The panel stays password-protected; this only lets the device reach the login page through the VPN.</span></div></label>
+  <div class="field"><label for="notes">Notes <span class="muted">(optional)</span></label><input id="notes" type="text" name="notes" maxlength="500"></div>
+  <button class="btn primary" type="submit">Create VPN profile</button>
+</form>
+<div class="card">
+  <h2>What happens</h2>
+  <ol class="small muted">
+    <li>A new Easy-RSA client certificate + private key are generated for this device only.</li>
+    <li>A static VPN address is reserved (adults {{ cfg.ranges.ADULT[0] }}–{{ cfg.ranges.ADULT[1] }}, children {{ cfg.ranges.CHILD[0] }}–{{ cfg.ranges.CHILD[1] }}, guests {{ cfg.ranges.GUEST[0] }}–{{ cfg.ranges.GUEST[1] }}).</li>
+    <li>The profile embeds the CA, the device certificate & key and the tls-crypt key; it connects to <code>{{ cfg.public_host }} {{ cfg.public_port }} {{ cfg.protocol }}</code>.</li>
+    <li>The private key is shredded on the server right after the profile is built. The encrypted profile can be downloaded for a limited time.</li>
+    <li>Filtering, schedule and firewall rules follow the device by its static address.</li>
+  </ol>
+  <div class="callout">Never share one profile between two devices — each device must have its own. Sharing is exactly what makes one of them drop off.</div>
+</div>
+</div>
+{% endif %}
+{% endblock %}

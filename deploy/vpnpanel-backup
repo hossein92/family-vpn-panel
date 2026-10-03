@@ -1,0 +1,47 @@
+#!/bin/bash
+# vpnpanel-backup — consistent, root-only backup of everything the VPN system needs.
+# Runs nightly via vpnpanel-backup.timer; keeps the newest 14 archives.
+#
+# Contents: /etc/openvpn (incl. PKI + CA key!), /etc/vpnpanel, panel database
+# (online sqlite backup), AdGuard config, UFW, sysctl, nginx site, systemd units.
+# The archive contains private key material: it is written 0600 to a 0700
+# root-only directory (BACKUP_DIR). Copy it off the server only in encrypted form.
+set -euo pipefail
+umask 077
+# Read KEY=VALUE lines without executing the file as shell code.
+load_env() {
+  local k v
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    [[ "$k" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
+    v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+    printf -v "$k" '%s' "$v"
+    export "${k?}"
+  done < "$1"
+}
+[ -r /etc/vpnpanel/panel.env ] && load_env /etc/vpnpanel/panel.env
+DEST=${BACKUP_DIR:-/var/backups/family-vpn-panel}
+DB=${DATABASE_PATH:-/var/lib/vpnpanel/vpnpanel.db}
+KEEP=${BACKUP_KEEP:-14}
+TS=$(date -u +%Y%m%dT%H%M%SZ)
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+install -d -m 700 "$DEST"
+
+sqlite3 "$DB" ".backup '$WORK/vpnpanel.db'"
+iptables-save > "$WORK/iptables.rules"
+nft list ruleset > "$WORK/nft.ruleset"
+ufw status verbose > "$WORK/ufw-status.txt"
+
+tar -C / -czf "$WORK/etc.tgz" \
+  etc/openvpn etc/vpnpanel etc/ufw etc/sysctl.d etc/default/ufw \
+  etc/nginx/sites-available/vpnpanel etc/nginx/vpnpanel-proxy.conf \
+  etc/systemd/system/vpnpanel.service etc/systemd/system/vpnpanel-nft.service \
+  etc/systemd/system/adguardhome.service etc/systemd/system/nginx.service.d \
+  etc/sudoers.d/50-vpnpanel var/lib/adguardhome/AdGuardHome.yaml \
+  usr/local/sbin/vpnpanel-helper usr/local/sbin/vpnpanel-admin usr/local/sbin/wait-for-vpn-ip
+
+tar -C "$WORK" -czf "$DEST/vpn-backup-$TS.tgz" vpnpanel.db iptables.rules nft.ruleset ufw-status.txt etc.tgz
+chmod 600 "$DEST/vpn-backup-$TS.tgz"
+sha256sum "$DEST/vpn-backup-$TS.tgz" > "$DEST/vpn-backup-$TS.tgz.sha256"
+ls -1t "$DEST"/vpn-backup-*.tgz | tail -n +$((KEEP + 1)) | while read -r f; do rm -f "$f" "$f.sha256"; done
+echo "backup written: $DEST/vpn-backup-$TS.tgz"

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input, type_badge, device_status, internet_badge with context %}
+{% block title %}Devices{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Devices</h1><p>Every device has its own certificate, private key, common name and static VPN address.</p></div>
+  <div class="actions"><a class="btn primary" href="/devices/new"><svg><use href="#i-plus"/></svg>Add device</a></div>
+</div>
+<div class="card">
+  <div class="table-tools">
+    <div class="search"><svg><use href="#i-search"/></svg><input type="search" placeholder="Search name, owner, CN, IP…" data-filter="#devtable" data-count="#devcount" aria-label="Search devices"></div>
+    <span class="muted small"><span id="devcount">{{ rows|length }}</span> shown</span>
+    <span class="seg">
+      <a href="?show=current" class="{{ 'on' if show == 'current' }}">Current</a>
+      <a href="?show=revoked" class="{{ 'on' if show == 'revoked' }}">Revoked</a>
+      <a href="?show=all" class="{{ 'on' if show == 'all' }}">All</a>
+    </span>
+  </div>
+  <div class="table-wrap">
+  <table id="devtable">
+    <thead><tr><th>Device</th><th>Owner</th><th>Status</th><th>Internet</th><th class="hide-sm">VPN IP</th><th class="hide-sm">Policy</th><th class="num hide-sm">Last connected</th><th class="num">Total traffic</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td><a class="cell-title" href="/devices/{{ r.d.id }}">{{ r.d.display_name }}</a>
+            <div class="cell-sub mono">{{ r.d.common_name }}{% if r.d.imported %} · imported{% endif %}</div></td>
+        <td><a href="/members/{{ r.m.id }}">{{ r.m.name }}</a><div class="cell-sub">{{ type_badge(r.m.type) }}</div></td>
+        <td>{{ device_status(r) }}{% if r.d.expires_at and r.status == 'active' %}<div class="cell-sub">expires {{ r.d.expires_at|dt('%Y-%m-%d') }}</div>{% endif %}</td>
+        <td>{{ internet_badge(r) }}</td>
+        <td class="hide-sm mono">{{ r.d.vpn_ipv4 }}</td>
+        <td class="hide-sm small">{{ r.p.name }}{% if r.d.policy_id %} <span class="muted">(device)</span>{% endif %}</td>
+        <td class="num hide-sm small">{{ 'now' if r.online else (r.d.last_connected_at|ago) }}<div class="cell-sub mono">{{ r.d.last_connected_ip or '' }}</div></td>
+        <td class="num">{{ (r.d.bytes_received + r.d.bytes_sent)|bytes }}</td>
+      </tr>
+    {% else %}
+      <tr class="empty-row"><td colspan="8" class="empty">No devices here.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endblock %}

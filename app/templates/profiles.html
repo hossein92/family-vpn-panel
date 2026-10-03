@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input, device_status with context %}
+{% block title %}VPN profiles{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>VPN profiles</h1><p>One .ovpn per device · endpoint <span class="mono">{{ endpoint }}</span> · download window {{ hours }} h after creation</p></div>
+  <div class="actions"><a class="btn primary" href="/devices/new"><svg><use href="#i-plus"/></svg>New profile</a></div>
+</div>
+<div class="callout">Private keys are never kept on the server. A profile can be downloaded during its window (stored encrypted until then). After that, “Regenerate” issues a new certificate and revokes the old one.</div>
+<div class="card">
+  <div class="table-tools"><div class="search"><svg><use href="#i-search"/></svg><input type="search" placeholder="Search…" data-filter="#ptable" aria-label="Search profiles"></div></div>
+  <div class="table-wrap">
+  <table id="ptable">
+    <thead><tr><th>Profile file</th><th>Device</th><th>Status</th><th class="hide-sm">Certificate</th><th>Download</th><th class="right">Actions</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td class="mono small">{{ r.d.common_name }}.ovpn</td>
+        <td><a class="cell-title" href="/devices/{{ r.d.id }}">{{ r.d.display_name }}</a><div class="cell-sub">{{ r.m.name }}</div></td>
+        <td>{{ device_status(r) }}</td>
+        <td class="hide-sm small"><span class="mono">{{ (r.d.certificate_serial or '')[:12] }}…</span><div class="cell-sub">
+          {% if r.cert_days_left is not none %}{% if r.cert_days_left < 30 %}<span class="badge b-warn">{{ r.cert_days_left }} days left</span>{% else %}valid until {{ r.d.certificate_not_after|dt('%Y-%m-%d') }}{% endif %}{% endif %}</div></td>
+        <td class="small">{% if r.download_open %}<span class="badge b-accent">Open</span><div class="cell-sub">closes {{ r.d.profile_available_until|ago }} · {{ r.d.profile_downloads }}×</div>
+            {% else %}<span class="badge plain">Closed</span>{% endif %}</td>
+        <td class="right nowrap">
+          {% if r.download_open %}
+          <form method="post" action="/devices/{{ r.d.id }}/profile" class="inline">{{ csrf_input() }}<button class="btn sm primary" type="submit"><svg><use href="#i-download"/></svg>.ovpn</button></form>
+          {% endif %}
+          <form method="post" action="/devices/{{ r.d.id }}/reissue" class="inline" data-confirm="Regenerate {{ r.d.common_name }}? The current profile stops working immediately." data-confirm-ok="Regenerate">{{ csrf_input() }}<button class="btn sm" type="submit">Regenerate</button></form>
+        </td>
+      </tr>
+    {% else %}<tr class="empty-row"><td colspan="6" class="empty">No profiles yet.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endblock %}

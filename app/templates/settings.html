@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input with context %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<div class="page-head"><div><h1>Settings</h1><p>Panel preferences. VPN endpoint values come from <code>/etc/vpnpanel/panel.env</code>.</p></div></div>
+<div class="grid g2">
+  <form class="card" method="post" action="/settings">
+    {{ csrf_input() }}
+    <h2>Panel</h2>
+    <div class="field"><label for="tz">Display timezone</label>
+      <select id="tz" name="display_timezone">{% for z in timezones %}<option value="{{ z }}" {{ 'selected' if z == vals.display_timezone }}>{{ z }}</option>{% endfor %}</select>
+      <div class="hint">Used for dates in the panel, “today/this month” traffic and the default for new schedules. The server clock stays on UTC.</div></div>
+    <div class="row">
+      <div class="field"><label for="pdh">Profile download window (hours)</label><input id="pdh" type="number" min="1" max="720" name="profile_download_hours" value="{{ vals.profile_download_hours }}"></div>
+      <div class="field"><label for="dcd">Certificate lifetime (days)</label><input id="dcd" type="number" min="30" max="3650" name="default_cert_days" value="{{ vals.default_cert_days }}"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label for="dgd">Default guest lifetime (days)</label><input id="dgd" type="number" min="1" max="365" name="default_guest_days" value="{{ vals.default_guest_days }}"></div>
+      <div class="field"><label for="sim">Session idle timeout (min)</label><input id="sim" type="number" min="5" max="240" name="session_idle_minutes" value="{{ vals.session_idle_minutes }}"></div>
+      <div class="field"><label for="sah">Session max age (hours)</label><input id="sah" type="number" min="1" max="72" name="session_absolute_hours" value="{{ vals.session_absolute_hours }}"></div>
+    </div>
+    <button class="btn primary" type="submit">Save</button>
+  </form>
+
+  <div>
+    <form class="card" method="post" action="/settings/password">
+      {{ csrf_input() }}
+      <h2>Change your password</h2>
+      <div class="field"><label for="cur">Current password</label><input id="cur" type="password" name="current" autocomplete="current-password" required></div>
+      <div class="field"><label for="nw">New password</label><input id="nw" type="password" name="new" autocomplete="new-password" minlength="12" required>
+        <div class="hint">At least 12 characters. A long passphrase is best.</div></div>
+      <div class="field"><label for="ag">Repeat new password</label><input id="ag" type="password" name="again" autocomplete="new-password" minlength="12" required></div>
+      <button class="btn primary" type="submit">Change password</button>
+    </form>
+    <div class="card">
+      <h2>VPN endpoint</h2>
+      <dl class="kv small">
+        <dt>Public address</dt><dd class="mono">{{ cfg.public_host }}</dd>
+        <dt>Port / protocol</dt><dd class="mono">{{ cfg.public_port }} / {{ cfg.protocol }}</dd>
+        <dt>VPN subnet</dt><dd class="mono">{{ cfg.subnet }} (server {{ cfg.server_ip }})</dd>
+        <dt>Resolver</dt><dd class="mono">{{ cfg.server_ip }} (AdGuard Home)</dd>
+        <dt>Admin panel</dt><dd class="mono">{{ cfg.admin_url }}</dd>
+      </dl>
+    </div>
+    <div class="card">
+      <h2>Administrators</h2>
+      <ul class="list-plain small">{% for a in admins %}<li><span><b>{{ a.username }}</b>{% if not a.enabled %} <span class="badge b-warn">disabled</span>{% endif %}</span><span class="muted">last sign-in {{ a.last_login_at|ago }}</span></li>{% endfor %}</ul>
+      <p class="small muted">Add or reset admins on the server: <code>sudo vpnpanel-admin create-admin NAME</code></p>
+    </div>
+  </div>
+</div>
+{% endblock %}

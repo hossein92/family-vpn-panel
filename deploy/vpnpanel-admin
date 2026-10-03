@@ -1,0 +1,4 @@
+#!/bin/sh
+# Local admin CLI for the Family VPN panel. Usage: sudo vpnpanel-admin --help
+[ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
+cd /opt/vpnpanel && exec runuser -u vpnpanel -- /opt/vpnpanel/venv/bin/python -m app.cli "$@"

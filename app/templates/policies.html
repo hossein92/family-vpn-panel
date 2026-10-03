@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input, type_badge with context %}
+{% block title %}Child profiles & policies{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Child profiles & policies</h1><p>Reusable templates. Assign one to a family member (all their devices) or override per device.</p></div>
+  <div class="actions"><button class="btn primary" type="button" data-open="#new-policy"><svg><use href="#i-plus"/></svg>New policy</button></div>
+</div>
+<div class="callout">Privacy-respecting, network-level controls only: DNS filtering per device, SafeSearch, service blocking and firewall schedules. No HTTPS interception and no root certificates on children’s devices.</div>
+<div class="grid g2">
+{% for p in pols %}
+  {% set u = usage[p.id] %}
+  <div class="card">
+    <div class="card-head">
+      <h2><a href="/policies/{{ p.id }}">{{ p.name }}</a></h2>
+      <div class="chips">{{ type_badge(p.kind) }}{% if p.builtin %}<span class="badge plain">Template</span>{% endif %}</div>
+    </div>
+    <p class="small muted">{{ p.description }}</p>
+    <div class="chips">
+      {% if p.block_malware %}<span class="badge plain b-good">Malware & phishing</span>{% endif %}
+      {% if p.block_adult %}<span class="badge plain b-bad">Adult blocked</span>{% endif %}
+      {% if p.block_gambling %}<span class="badge plain b-bad">Gambling blocked</span>{% endif %}
+      {% if p.block_tracking %}<span class="badge plain b-info">Trackers blocked</span>{% endif %}
+      {% if p.safesearch %}<span class="badge plain b-info">SafeSearch</span>{% endif %}
+      {% if p.youtube_restricted %}<span class="badge plain b-info">YouTube restricted</span>{% endif %}
+      {% if p.block_encrypted_dns %}<span class="badge plain">No DNS bypass</span>{% endif %}
+      {% for g, rule in p.service_rules.items() if g in groups %}
+        <span class="badge plain b-warn">{{ groups[g] }}: {{ 'blocked' if rule.mode == 'block' else 'blocked ' ~ rule.start ~ '–' ~ rule.end }}</span>
+      {% endfor %}
+      {% if p.enforce_schedule %}<span class="badge plain b-accent">Schedule enforced</span>{% endif %}
+      {% if p.custom_block %}<span class="badge plain">{{ p.custom_block.split('\n')|length }} custom blocks</span>{% endif %}
+      {% if p.custom_allow %}<span class="badge plain">{{ p.custom_allow.split('\n')|length }} custom allows</span>{% endif %}
+    </div>
+    <p class="small muted policy-usage">Used by: {% for m in u.members %}<a href="/members/{{ m.id }}">{{ m.name }}</a>{{ ', ' if not loop.last }}{% else %}nobody{% endfor %}{% if u.devices %} · {{ u.devices }} device override(s){% endif %}</p>
+    <a class="btn sm" href="/policies/{{ p.id }}">Edit</a>
+  </div>
+{% endfor %}
+</div>
+
+<dialog id="new-policy">
+  <form method="post" action="/policies">
+    {{ csrf_input() }}
+    <div class="dlg-body">
+      <h2>New policy</h2>
+      <p class="small muted">Start from an existing template, e.g. “Child A” from Child — standard, or “Child B” from Child — strict.</p>
+      <div class="field"><label for="np-name">Name</label><input id="np-name" type="text" name="name" maxlength="60" required placeholder="e.g. Child A"></div>
+      <div class="field"><label for="np-src">Copy settings from</label>
+        <select id="np-src" name="clone_from">{% for p in pols %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}</select></div>
+    </div>
+    <div class="dlg-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">Create</button></div>
+  </form>
+</dialog>
+{% endblock %}

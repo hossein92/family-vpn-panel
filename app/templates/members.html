@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input, type_badge, avatar with context %}
+{% block title %}Family members{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Family members</h1><p>People are separate from devices: each person can have several devices, each with its own certificate.</p></div>
+  <div class="actions"><button class="btn primary" type="button" data-open="#new-member"><svg><use href="#i-plus"/></svg>Add family member</button></div>
+</div>
+
+{% if not members %}
+<div class="card empty">
+  <h2>No family members yet</h2>
+  <p>Start by adding a person (adult, child or guest). Then give each of their phones, tablets and computers its own VPN profile.</p>
+  <button class="btn primary" type="button" data-open="#new-member">Add the first family member</button>
+</div>
+{% endif %}
+
+<div class="grid g3">
+{% for it in members %}
+  {% set m = it.m %}
+  <div class="card member-card">
+    <div class="who">
+      {{ avatar(m.name, m.type) }}
+      <div>
+        <a class="cell-title" href="/members/{{ m.id }}">{{ m.name }}</a>
+        <div class="chips">{{ type_badge(m.type) }}{% if not m.enabled %}<span class="badge b-warn">Paused</span>{% endif %}</div>
+      </div>
+    </div>
+    <dl class="kv small">
+      <dt>Policy</dt><dd>{{ m.policy_name }}</dd>
+      <dt>Devices</dt><dd>{{ it.devices|length }} · <span class="{{ 'badge b-good' if it.online }}">{{ it.online }} online</span></dd>
+      {% if it.sched.windows or it.sched.override %}
+      <dt>Internet</dt><dd>{% if it.sched.allowed %}<span class="badge plain b-good">Allowed</span>{% else %}<span class="badge plain b-warn">Blocked</span>{% endif %}
+        <span class="muted">{{ it.sched.reason }}</span></dd>
+      {% endif %}
+    </dl>
+    <div class="actions">
+      <a class="btn sm" href="/members/{{ m.id }}">Open</a>
+      <a class="btn sm" href="/devices/new?member={{ m.id }}"><svg><use href="#i-plus"/></svg>Device</a>
+      {% if m.type == 'CHILD' %}<a class="btn sm" href="/schedules/{{ m.id }}">Schedule</a>{% endif %}
+    </div>
+  </div>
+{% endfor %}
+</div>
+
+<dialog id="new-member">
+  <form method="post" action="/members">
+    {{ csrf_input() }}
+    <div class="dlg-body">
+      <h2>Add family member</h2>
+      <div class="field"><label for="nm-name">Name</label><input id="nm-name" type="text" name="name" maxlength="60" required placeholder="e.g. Alex, Child One, Grandparent"></div>
+      <div class="field"><label>Type</label>
+        <div class="seg">
+          <input type="radio" id="t-a" name="type" value="ADULT" checked><label for="t-a">Adult</label>
+          <input type="radio" id="t-c" name="type" value="CHILD"><label for="t-c">Child</label>
+          <input type="radio" id="t-g" name="type" value="GUEST"><label for="t-g">Guest</label>
+        </div>
+      </div>
+      <div class="field"><label for="nm-pol">Policy</label>
+        <select id="nm-pol" name="policy_id">
+          <option value="">Default for the type (Adult → unrestricted, Child → standard, Guest → guest)</option>
+          {% for p in policies %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field"><label for="nm-notes">Notes <span class="muted">(optional)</span></label><input id="nm-notes" type="text" name="notes" maxlength="500"></div>
+    </div>
+    <div class="dlg-foot"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">Add</button></div>
+  </form>
+</dialog>
+{% endblock %}

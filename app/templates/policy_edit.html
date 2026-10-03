@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input with context %}
+{% block title %}{{ p.name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><p class="small"><a href="/policies">← Policies</a></p><h1>{{ p.name }}</h1><p>{{ p.description }}</p></div>
+  {% if not p.builtin %}
+  <div class="actions">
+    <form method="post" action="/policies/{{ p.id }}/delete" class="inline" data-confirm="Delete policy “{{ p.name }}”?" data-confirm-ok="Delete">{{ csrf_input() }}<button class="btn danger" type="submit">Delete</button></form>
+  </div>
+  {% endif %}
+</div>
+<form method="post" action="/policies/{{ p.id }}">
+  {{ csrf_input() }}
+  <div class="grid g2">
+    <div class="card">
+      <h2>General</h2>
+      <div class="row">
+        <div class="field"><label for="n">Name</label><input id="n" type="text" name="name" value="{{ p.name }}" maxlength="60" required></div>
+        <div class="field"><label for="k">Kind</label>
+          <select id="k" name="kind">{% for k, l in [('ADULT','Adult'),('CHILD','Child'),('GUEST','Guest')] %}<option value="{{ k }}" {{ 'selected' if p.kind == k }}>{{ l }}</option>{% endfor %}</select>
+          <div class="hint">“Child” devices also get DNS-over-TLS blocked at the firewall.</div></div>
+      </div>
+      <div class="field"><label for="dsc">Description</label><input id="dsc" type="text" name="description" value="{{ p.description }}" maxlength="300"></div>
+
+      <h3>Content filtering</h3>
+      <label class="check"><input type="checkbox" name="block_malware" {{ 'checked' if p.block_malware }}><div><b>Malware & phishing protection</b><span>AdGuard Safe Browsing (hash-prefix lookups). Global threat lists apply to every device regardless.</span></div></label>
+      <label class="check"><input type="checkbox" name="block_adult" {{ 'checked' if p.block_adult }}><div><b>Block adult content & pornography</b><span>{{ categories.adult[1] }} list + AdGuard Parental Control.</span></div></label>
+      <label class="check"><input type="checkbox" name="block_gambling" {{ 'checked' if p.block_gambling }}><div><b>Block gambling</b><span>{{ categories.gambling[1] }} list + gambling services.</span></div></label>
+      <label class="check"><input type="checkbox" name="block_tracking" {{ 'checked' if p.block_tracking }}><div><b>Block ads & known trackers</b><span>{{ categories.tracking[1] }}.</span></div></label>
+      <label class="check"><input type="checkbox" name="block_encrypted_dns" {{ 'checked' if p.block_encrypted_dns }}><div><b>Prevent filter bypass</b><span>Blocks encrypted-DNS resolvers, public VPN/proxy services and iCloud Private Relay so the device cannot route around the filter.</span></div></label>
+      <label class="check"><input type="checkbox" name="safesearch" {{ 'checked' if p.safesearch }}><div><b>Enforce SafeSearch</b><span>Google, Bing, DuckDuckGo, Yandex, Ecosia, Pixabay.</span></div></label>
+      <label class="check"><input type="checkbox" name="youtube_restricted" {{ 'checked' if p.youtube_restricted }}><div><b>YouTube Restricted Mode</b><span>Enforced via DNS for the YouTube website and apps.</span></div></label>
+      <label class="check"><input type="checkbox" name="enforce_schedule" {{ 'checked' if p.enforce_schedule }}><div><b>Enforce an access schedule</b><span>If a member with this policy has no schedule, the default applies (weekdays 06:30–21:30, weekends 07:30–22:30).</span></div></label>
+    </div>
+
+    <div class="card">
+      <h2>Apps & services</h2>
+      <p class="small muted">Blocked by DNS for this policy’s devices. “Blocked during” uses the member’s schedule timezone.</p>
+      {% for g, label in groups.items() %}
+      {% set rule = p.service_rules.get(g, {}) %}
+      <div class="field">
+        <label for="svc_{{ g }}">{{ label }}</label>
+        <div class="row">
+          <select id="svc_{{ g }}" name="svc_{{ g }}" data-window="#win_{{ g }}">
+            <option value="allow" {{ 'selected' if rule.get('mode', 'allow') == 'allow' }}>Allowed</option>
+            <option value="block" {{ 'selected' if rule.get('mode') == 'block' }}>Always blocked</option>
+            <option value="window" {{ 'selected' if rule.get('mode') == 'window' }}>Blocked during…</option>
+          </select>
+          <div id="win_{{ g }}" class="row">
+            <input type="time" name="svc_{{ g }}_start" value="{{ rule.get('start', '21:00') }}" aria-label="{{ label }} blocked from">
+            <input type="time" name="svc_{{ g }}_end" value="{{ rule.get('end', '07:00') }}" aria-label="{{ label }} blocked until">
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+      {% if catalog %}
+      <details>
+        <summary>Block individual apps ({{ p.extra_services|length }} selected)</summary>
+        {% for g, label in groups.items() %}
+          <h3 class="svc-group">{{ label }}</h3>
+          <div class="svc-grid">
+          {% for s in catalog if s.group == g %}
+            <label><input type="checkbox" name="extra_services" value="{{ s.id }}" {{ 'checked' if s.id in p.extra_services }}> {{ s.name }}</label>
+          {% endfor %}
+          </div>
+        {% endfor %}
+      </details>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="grid g2">
+    <div class="card">
+      <h2>Custom blocklist</h2>
+      <p class="small muted">One domain per line; subdomains are included.</p>
+      <textarea name="custom_block" placeholder="example-game.com&#10;videos.example.net">{{ p.custom_block }}</textarea>
+    </div>
+    <div class="card">
+      <h2>Custom allowlist</h2>
+      <p class="small muted">Always allowed for this policy, even if a list blocks it (e.g. a school site).</p>
+      <textarea name="custom_allow" placeholder="school.example.org">{{ p.custom_allow }}</textarea>
+    </div>
+  </div>
+  <div class="card save-bar"><button class="btn primary" type="submit">Save & apply</button>
+    <span class="muted small">&nbsp; Changes reach devices within seconds; no reconnect needed.</span></div>
+</form>
+{% endblock %}

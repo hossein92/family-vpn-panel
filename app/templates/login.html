@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block body %}
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="brand"><span class="logo"><svg width="18" height="18"><use href="#i-shield"/></svg></span>
+      <span>Family VPN<small>Administrator sign-in</small></span></div>
+    <div class="card">
+      {% if fake %}<div class="flash info">Demo mode — sign in with <b>demo</b> / <b>demo-password-123</b></div>{% endif %}
+      {% if error %}<div class="flash error" role="alert">{{ error }}</div>{% endif %}
+      <form method="post" action="/login" autocomplete="on">
+        <input type="hidden" name="login_csrf" value="{{ login_csrf }}">
+        <input type="hidden" name="next" value="{{ next }}">
+        <div class="field"><label for="u">Username</label>
+          <input id="u" type="text" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></div>
+        <div class="field"><label for="p">Password</label>
+          <input id="p" type="password" name="password" autocomplete="current-password" required></div>
+        <button class="btn primary" type="submit">Sign in</button>
+      </form>
+    </div>
+    <p class="muted small login-note">Reachable only through the VPN or an SSH tunnel. Every sign-in is recorded in the audit log.</p>
+  </div>
+</div>
+{% endblock %}

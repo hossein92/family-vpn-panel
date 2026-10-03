@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% from "macros.html" import bar_chart with context %}
+{% block title %}Traffic usage{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Traffic usage</h1><p>{{ s_loc.strftime('%a %d %b') }} – {{ (e_loc).strftime('%a %d %b') }} · {{ tz }} · metadata from OpenVPN byte counters</p></div>
+  <span class="seg">
+    {% for k, l in [('today','Today'),('7d','7 days'),('30d','30 days'),('month','This month')] %}<a href="?period={{ k }}" class="{{ 'on' if period == k }}">{{ l }}</a>{% endfor %}
+  </span>
+</div>
+<div class="grid g3">
+  <div class="card stat"><div class="label">Total</div><div class="value">{{ (total.rx + total.tx)|bytes }}</div></div>
+  <div class="card stat"><div class="label">↓ Downloaded by devices</div><div class="value">{{ total.tx|bytes }}</div></div>
+  <div class="card stat"><div class="label">↑ Uploaded by devices</div><div class="value">{{ total.rx|bytes }}</div></div>
+</div>
+<div class="card">
+  <div class="card-head"><h2>{{ 'Hourly' if period == 'today' else 'Daily' }} traffic, all devices</h2><span class="muted small">hover a bar for details</span></div>
+  {{ bar_chart(series, 200, "All devices traffic") }}
+  <details class="table-view"><summary>Show as table</summary>
+    <table><thead><tr><th>{{ 'Hour' if period == 'today' else 'Day' }}</th><th class="num">↓ Download</th><th class="num">↑ Upload</th><th class="num">Total</th></tr></thead>
+      <tbody>{% for p in series %}<tr><td>{{ p.day }}</td><td class="num">{{ p.tx|bytes }}</td><td class="num">{{ p.rx|bytes }}</td><td class="num">{{ p.total|bytes }}</td></tr>{% endfor %}</tbody></table>
+  </details>
+</div>
+<div class="grid g-2-1">
+  <div class="card">
+    <h2>By device</h2>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Device</th><th class="num">↓ Download</th><th class="num">↑ Upload</th><th class="num">Total</th></tr></thead>
+      <tbody>
+      {% for r in per if r.rx + r.tx > 0 %}
+        <tr><td><a class="cell-title" href="/devices/{{ r.id }}">{{ r.display_name }}</a>{% if r.revoked %} <span class="badge b-bad">revoked</span>{% endif %}<div class="cell-sub">{{ r.owner }}</div></td>
+            <td class="num">{{ r.tx|bytes }}</td><td class="num">{{ r.rx|bytes }}</td><td class="num"><b>{{ (r.rx + r.tx)|bytes }}</b></td></tr>
+      {% else %}<tr class="empty-row"><td colspan="4" class="empty">No traffic in this period.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+  <div class="card">
+    <h2>By person</h2>
+    <ul class="list-plain">
+      {% for o in owners if o.rx + o.tx > 0 %}<li><span>{{ o.name }}</span><b>{{ (o.rx + o.tx)|bytes }}</b></li>
+      {% else %}<li class="muted">No traffic.</li>{% endfor %}
+    </ul>
+  </div>
+</div>
+<div class="card">
+  <h2>Sessions in this period</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Device</th><th>Connected</th><th>Duration</th><th class="hide-sm">Public IP</th><th class="hide-sm">VPN IP</th><th class="num">Traffic</th></tr></thead>
+    <tbody>
+    {% for s in sessions %}
+      <tr><td>{{ s.display_name or s.common_name }}<div class="cell-sub">{{ s.owner or 'unmanaged' }}</div></td>
+          <td class="small">{{ s.connected_at|dt }}{% if not s.disconnected_at %} <span class="badge b-good">live</span>{% endif %}</td>
+          <td class="small">{{ session_duration(s)|duration }}</td>
+          <td class="mono small hide-sm">{{ s.real_address.rsplit(':',1)[0] if s.real_address }}</td>
+          <td class="mono small hide-sm">{{ s.vpn_ipv4 }}</td>
+          <td class="num small">{{ (s.bytes_received + s.bytes_sent)|bytes }}</td></tr>
+    {% else %}<tr class="empty-row"><td colspan="6" class="empty">No sessions.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endblock %}

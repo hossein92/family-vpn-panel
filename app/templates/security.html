@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input with context %}
+{% block title %}Security & revocation{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Security & revocation</h1><p>Certificate authority, revocation list, unmanaged certificates and admin sessions.</p></div>
+</div>
+{% if err %}<div class="flash error">Could not read the PKI: {{ err }}</div>{% endif %}
+<div class="grid g4">
+  <div class="card stat"><div class="label">Certificate revocation list</div>
+    <div class="value">{% if crl_days is not none and crl_days > 365 %}<span class="badge b-good">Valid</span>{% elif crl_days is not none %}<span class="badge b-warn">{{ crl_days }} days</span>{% else %}?{% endif %}</div>
+    <div class="sub">next update {{ pki.crl_next_update }} · auto-renewed</div></div>
+  <div class="card stat"><div class="label">CA certificate</div><div class="value small-value">{{ pki.ca_not_after|dt('%Y-%m-%d') }}</div><div class="sub">expiry · CN “Easy-RSA CA”</div></div>
+  <div class="card stat"><div class="label">Valid client certs</div><div class="value">{{ pki.certs|selectattr('status','eq','valid')|rejectattr('cn','eq','server')|list|length }}</div></div>
+  <div class="card stat"><div class="label">Revoked certs</div><div class="value">{{ pki.certs|selectattr('status','eq','revoked')|list|length }}</div><div class="sub">rejected by OpenVPN (crl-verify)</div></div>
+</div>
+
+{% if unmanaged %}
+<div class="card">
+  <div class="card-head"><h2>Unmanaged certificates</h2><span class="badge b-warn">{{ unmanaged|length }}</span></div>
+  <p class="small muted">Valid certificates issued outside the panel. Adopt them to assign an owner, static IP and policy — or create proper per-device profiles and revoke these.</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Common name</th><th>Serial</th><th>Valid until</th><th>Adopt as device of…</th></tr></thead>
+    <tbody>
+    {% for c in unmanaged %}
+      <tr><td class="mono">{{ c.cn }}</td><td class="mono small">{{ c.serial }}</td><td class="small">{{ c.not_after|dt('%Y-%m-%d') }}</td>
+        <td>
+          <form method="post" action="/security/adopt" class="adopt-form">
+            {{ csrf_input() }}<input type="hidden" name="cn" value="{{ c.cn }}">
+            <select name="member_id" required aria-label="Owner">{% for m in members %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}</select>
+            <input type="text" name="display_name" value="{{ c.cn }}" aria-label="Display name">
+            <label class="inline-check"><input type="checkbox" name="panel_access"> panel</label>
+            <button class="btn sm" type="submit" {{ 'disabled' if not members }}>Adopt</button>
+          </form>
+        </td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-head"><h2>All certificates</h2>
+    <div class="search"><svg><use href="#i-search"/></svg><input type="search" placeholder="Search…" data-filter="#certs" aria-label="Search certificates"></div></div>
+  <div class="table-wrap">
+  <table id="certs">
+    <thead><tr><th>Common name</th><th>Device</th><th>Serial</th><th>Status</th><th>Valid until</th><th>Revoked</th></tr></thead>
+    <tbody>
+    {% for c in pki.certs|reverse %}
+      {% set dev = managed.get(c.cn) %}{% set hist = serial_map.get(c.serial) %}
+      <tr><td class="mono small">{{ c.cn }}</td>
+          <td class="small">{% if c.cn == 'server' %}<span class="badge plain">OpenVPN server</span>{% elif dev %}<a href="/devices/{{ dev.id }}">{{ dev.display_name }}</a> · {{ dev.owner }}{% else %}<span class="muted">unmanaged</span>{% endif %}</td>
+          <td class="mono small">{{ c.serial }}</td>
+          <td>{% if c.status == 'valid' %}<span class="badge b-good">Valid</span>{% elif c.status == 'revoked' %}<span class="badge b-bad">Revoked</span>{% else %}<span class="badge b-warn">{{ c.status|capitalize }}</span>{% endif %}</td>
+          <td class="small">{{ c.not_after|dt('%Y-%m-%d') }}</td>
+          <td class="small">{{ c.revoked_at|dt if c.revoked_at else '—' }}{% if hist and hist.revoke_reason %} · {{ hist.revoke_reason }}{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<div class="grid g2">
+  <div class="card">
+    <div class="card-head"><h2>Admin sessions</h2>
+      <form method="post" action="/security/sessions/revoke-others" class="inline" data-confirm="Sign out every other admin session?" data-confirm-ok="Sign out others">{{ csrf_input() }}<button class="btn sm" type="submit">Sign out others</button></form></div>
+    <ul class="list-plain small">
+      {% for s in sessions %}
+      <li><span><b>{{ s.username }}</b> · <span class="mono">{{ s.ip }}</span>{% if s.id == my_sid %} <span class="badge b-accent">this session</span>{% endif %}<br><span class="muted">{{ s.user_agent[:70] }}</span></span>
+          <span class="muted nowrap">active {{ s.last_seen_at|ago }}</span></li>
+      {% endfor %}
+    </ul>
+  </div>
+  <div class="card">
+    <h2>Failed sign-ins (24 h)</h2>
+    <ul class="list-plain small">
+      {% for f in fails %}<li><span class="mono">{{ f.username }} · {{ f.ip }}</span><span class="muted">{{ f.ts|ago }}</span></li>
+      {% else %}<li class="muted">None.</li>{% endfor %}
+    </ul>
+    <p class="small muted">After 5 failures per username (or 15 per address) sign-in is locked for 15 minutes.</p>
+  </div>
+</div>
+{% endblock %}

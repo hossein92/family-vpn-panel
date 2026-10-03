@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Error {{ code }}{% endblock %}
+{% block body %}
+<div class="login-wrap">
+  <div class="login-card card">
+    <h1>{{ 'Not found' if code == 404 else 'Request refused' if code == 403 else 'Something went wrong' }}</h1>
+    <p class="muted">{{ detail }}</p>
+    <a class="btn" href="/">Back to dashboard</a>
+  </div>
+</div>
+{% endblock %}

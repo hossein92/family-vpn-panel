@@ -1,0 +1,526 @@
+#!/usr/bin/python3 -I
+"""vpnpanel-helper — the only privileged component of the VPN admin panel.
+
+Invoked by the unprivileged `vpnpanel` service through a single sudoers rule:
+
+    vpnpanel ALL=(root) NOPASSWD: /usr/local/sbin/vpnpanel-helper
+
+Every verb validates its arguments strictly. Output is JSON on stdout.
+Private keys are never logged; the client key exists on disk only for the
+few hundred milliseconds between Easy-RSA writing it and this helper shredding
+it after embedding it in the returned profile.
+"""
+import ipaddress
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+
+# Deployment values come ONLY from this root-owned file (never from the caller's
+# environment: sudo resets it and python runs isolated with -I).
+ENV_FILE = "/etc/vpnpanel/panel.env"
+MGMT_SOCK = "/run/openvpn-server/management.sock"
+NFT_FILE = "/etc/vpnpanel/vpnpanel.nft"
+
+
+def read_env_file(path):
+    values = {}
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return values
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        values[k.strip()] = v
+    return values
+
+
+def configure(values):
+    """Derive all module settings from a config mapping (also used by the unit tests)."""
+    global CFG, EASYRSA_DIR, PKI, SERVER_DIR, CCD_DIR, CRL_LIVE, TLS_CRYPT
+    global VPN_NET, SERVER_IP, VPN_NET6, VPN_IF, PUBLIC_IF
+    CFG = {
+        "VPN_PUBLIC_HOST": "vpn.example.com", "VPN_PUBLIC_PORT": "443", "VPN_PROTOCOL": "tcp",
+        "VPN_IPV4_SUBNET": "10.8.0.0/24", "VPN_IPV6_SUBNET": "fd00:8:0:1::/64",
+        "VPN_INTERFACE": "tun0", "PUBLIC_INTERFACE": "eth0",
+        "ADMIN_PORT": "8443", "ADGUARD_URL": "http://127.0.0.1:3080",
+        "OPENVPN_CONFIG_DIR": "/etc/openvpn/server", "EASYRSA_DIR": "/etc/openvpn/easy-rsa",
+    }
+    CFG.update(values)
+    EASYRSA_DIR = CFG["EASYRSA_DIR"]
+    PKI = EASYRSA_DIR + "/pki"
+    SERVER_DIR = CFG["OPENVPN_CONFIG_DIR"]
+    CCD_DIR = SERVER_DIR + "/ccd"
+    CRL_LIVE = SERVER_DIR + "/crl.pem"
+    TLS_CRYPT = SERVER_DIR + "/tls-crypt.key"
+    VPN_NET = ipaddress.ip_network(CFG["VPN_IPV4_SUBNET"])
+    SERVER_IP = ipaddress.ip_address(CFG.get("VPN_SERVER_ADDRESS") or str(VPN_NET.network_address + 1))
+    VPN_NET6 = ipaddress.ip_network(CFG["VPN_IPV6_SUBNET"])
+    for name in ("VPN_INTERFACE", "PUBLIC_INTERFACE"):
+        if not re.match(r"^[A-Za-z0-9_.-]{1,15}$", CFG[name]):
+            raise ValueError(f"invalid {name}")
+    VPN_IF, PUBLIC_IF = CFG["VPN_INTERFACE"], CFG["PUBLIC_INTERFACE"]
+    for name in ("VPN_PUBLIC_PORT", "ADMIN_PORT"):
+        int(CFG[name])
+    if not re.match(r"^[A-Za-z0-9.:-]{1,253}$", CFG["VPN_PUBLIC_HOST"]):
+        raise ValueError("invalid VPN_PUBLIC_HOST")
+
+
+configure(read_env_file(ENV_FILE))
+
+CN_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
+RESERVED_CN = {"server", "ca"}
+SERVICES = ("openvpn-server@server", "adguardhome", "vpnpanel", "nginx", "ufw", "vpnpanel-nft", "ssh")
+
+os.umask(0o077)
+os.environ["PATH"] = "/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+class HelperError(Exception):
+    pass
+
+
+def out(obj):
+    sys.stdout.write(json.dumps(obj))
+    sys.stdout.write("\n")
+
+
+def fail(msg, code=2):
+    out({"ok": False, "error": msg})
+    sys.exit(code)
+
+
+def check_cn(cn):
+    if not isinstance(cn, str) or not CN_RE.match(cn) or cn in RESERVED_CN:
+        raise HelperError("invalid common name")
+    return cn
+
+
+def check_client_ip(ip):
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError as e:
+        raise HelperError("invalid ip") from e
+    if addr not in VPN_NET or addr == SERVER_IP or addr in (VPN_NET.network_address, VPN_NET.broadcast_address):
+        raise HelperError("ip outside client range")
+    return str(addr)
+
+
+def run(cmd, env=None, check=True, input_data=None):
+    e = dict(os.environ)
+    if env:
+        e.update(env)
+    p = subprocess.run(cmd, env=e, input=input_data, capture_output=True, text=True)
+    if check and p.returncode != 0:
+        # stderr from easyrsa/nft never contains key material
+        raise HelperError(f"{os.path.basename(cmd[0])} failed: {p.stderr.strip()[-400:]}")
+    return p
+
+
+def easyrsa(args, extra_env=None):
+    env = {"EASYRSA_BATCH": "1", "EASYRSA_PKI": PKI, "EASYRSA_CRL_DAYS": "3650"}
+    if extra_env:
+        env.update(extra_env)
+    return run([EASYRSA_DIR + "/easyrsa", "--pki-dir=" + PKI] + args, env=env)
+
+
+def shred(path):
+    if os.path.exists(path):
+        subprocess.run(["shred", "-u", "-z", path], capture_output=True)
+        if os.path.exists(path):
+            os.unlink(path)
+
+
+def read(path):
+    with open(path) as f:
+        return f.read()
+
+
+def pem_block(text, kind):
+    m = re.search(rf"-----BEGIN {kind}-----.*?-----END {kind}-----", text, re.S)
+    if not m:
+        raise HelperError(f"malformed {kind}")
+    return m.group(0)
+
+
+def cert_meta(path):
+    p = run(["openssl", "x509", "-in", path, "-noout", "-serial", "-startdate", "-enddate", "-subject"])
+    meta = {}
+    for line in p.stdout.splitlines():
+        k, _, v = line.partition("=")
+        meta[k.strip()] = v.strip()
+
+    def iso(s):
+        return datetime.strptime(s, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc).isoformat()
+
+    return {"serial": meta["serial"].upper(), "not_before": iso(meta["notBefore"]), "not_after": iso(meta["notAfter"])}
+
+
+def install_crl():
+    easyrsa(["gen-crl"])
+    tmp = CRL_LIVE + ".tmp"
+    with open(PKI + "/crl.pem") as src, open(tmp, "w") as dst:
+        dst.write(src.read())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, CRL_LIVE)  # atomic: OpenVPN re-reads the CRL on each new TLS handshake
+
+
+# ---------------------------------------------------------------- verbs
+
+def v_issue(cn, days, display=""):
+    """Issue a unique client certificate and return a complete .ovpn profile."""
+    check_cn(cn)
+    days = int(days)
+    if not 1 <= days <= 3650:
+        raise HelperError("days out of range")
+    display = re.sub(r"[^\w .,'()-]", "", str(display))[:80]
+    if os.path.exists(f"{PKI}/issued/{cn}.crt"):
+        raise HelperError("certificate for this CN already exists; revoke first")
+    for stale in (f"{PKI}/private/{cn}.key", f"{PKI}/reqs/{cn}.req", f"{PKI}/inline/{cn}.inline"):
+        shred(stale)
+    key_path = f"{PKI}/private/{cn}.key"
+    try:
+        easyrsa(["build-client-full", cn, "nopass"], {"EASYRSA_CERT_EXPIRE": str(days)})
+        crt_path = f"{PKI}/issued/{cn}.crt"
+        meta = cert_meta(crt_path)
+        ca = pem_block(read(PKI + "/ca.crt"), "CERTIFICATE")
+        cert = pem_block(read(crt_path), "CERTIFICATE")
+        key = pem_block(read(key_path), "PRIVATE KEY")
+        tlsc = read(TLS_CRYPT).strip()
+        profile = "\n".join([
+            f"# Family VPN profile — {display or cn}",
+            f"# Device CN: {cn} · serial {meta['serial']} · valid until {meta['not_after'][:10]}",
+            "# This file contains a private key. Install it on ONE device only.",
+            "client",
+            "dev tun",
+            f"proto {'tcp-client' if CFG['VPN_PROTOCOL'] == 'tcp' else 'udp'}",
+            f"remote {CFG['VPN_PUBLIC_HOST']} {int(CFG['VPN_PUBLIC_PORT'])}",
+            "resolv-retry infinite",
+            "nobind",
+            "persist-key",
+            "persist-tun",
+            "remote-cert-tls server",
+            "verify-x509-name server name",
+            "tls-version-min 1.2",
+            "data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305",
+            "auth SHA256",
+            "verb 3",
+            "<ca>", ca, "</ca>",
+            "<cert>", cert, "</cert>",
+            "<key>", key, "</key>",
+            "<tls-crypt>", tlsc, "</tls-crypt>",
+            "",
+        ])
+    finally:
+        # Never keep client private keys on the server.
+        shred(key_path)
+        shred(f"{PKI}/inline/{cn}.inline")
+        shred(f"{PKI}/reqs/{cn}.req")
+    return {"ok": True, "cn": cn, **meta, "profile": profile}
+
+
+def v_revoke(cn, reason="cessationOfOperation"):
+    check_cn(cn)
+    if reason not in ("unspecified", "keyCompromise", "superseded", "cessationOfOperation", "affiliationChanged"):
+        raise HelperError("bad reason")
+    crt = f"{PKI}/issued/{cn}.crt"
+    serial = None
+    if os.path.exists(crt):
+        serial = cert_meta(crt)["serial"]
+        easyrsa(["revoke", cn, reason])
+    install_crl()
+    killed = _mgmt_kill_cn(cn)
+    return {"ok": True, "cn": cn, "serial": serial, "already_revoked": serial is None, "sessions_killed": killed}
+
+
+def ipv6_for(ip):
+    """Readable tunnel IPv6 for a client: host offset 10 -> <prefix>::10 (digits read as hex)."""
+    offset = int(ipaddress.ip_address(ip)) - int(VPN_NET.network_address)
+    return str(VPN_NET6.network_address + int(str(offset), 16))
+
+
+def v_ccd_write(cn, ip, enabled):
+    check_cn(cn)
+    ip = check_client_ip(ip)
+    enabled = str(enabled) in ("1", "true", "yes")
+    v6 = ipv6_for(ip)
+    lines = [
+        f"# managed by vpnpanel — do not edit by hand ({datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC)",
+        f"ifconfig-push {ip} 255.255.255.0",
+        f"ifconfig-ipv6-push {v6}/{VPN_NET6.prefixlen} {VPN_NET6.network_address + 1}",
+    ]
+    if not enabled:
+        lines.append("disable")
+    path = f"{CCD_DIR}/{cn}"
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.chmod(tmp, 0o644)  # read by OpenVPN after it drops to nobody
+    os.replace(tmp, path)
+    killed = 0 if enabled else _mgmt_kill_cn(cn)
+    return {"ok": True, "cn": cn, "ip": ip, "enabled": enabled, "sessions_killed": killed}
+
+
+def v_ccd_delete(cn):
+    check_cn(cn)
+    path = f"{CCD_DIR}/{cn}"
+    if os.path.exists(path):
+        os.unlink(path)
+    return {"ok": True, "cn": cn, "sessions_killed": _mgmt_kill_cn(cn)}
+
+
+def v_ccd_list():
+    res = {}
+    for name in sorted(os.listdir(CCD_DIR)):
+        if not CN_RE.match(name):
+            continue
+        txt = read(f"{CCD_DIR}/{name}")
+        m = re.search(r"^ifconfig-push (\S+)", txt, re.M)
+        res[name] = {"ip": m.group(1) if m else None, "disabled": bool(re.search(r"^disable\s*$", txt, re.M))}
+    return {"ok": True, "ccd": res}
+
+
+def v_pki_list():
+    """Certificate metadata from Easy-RSA's index (no key material)."""
+    certs = []
+    for line in read(PKI + "/index.txt").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 6:
+            continue
+        status, exp, rev, serial, _, subject = parts[:6]
+        m = re.search(r"/CN=([^/]+)", subject)
+        cn = m.group(1) if m else subject
+        certs.append({
+            "cn": cn, "serial": serial.upper(),
+            "status": {"V": "valid", "R": "revoked", "E": "expired"}.get(status, status),
+            "not_after": _asn1_time(exp), "revoked_at": _asn1_time(rev.split(",")[0]) if rev else None,
+        })
+    crl = run(["openssl", "crl", "-in", CRL_LIVE, "-noout", "-nextupdate"]).stdout.strip().partition("=")[2]
+    ca = cert_meta(PKI + "/ca.crt")
+    return {"ok": True, "certs": certs, "crl_next_update": crl, "ca_not_after": ca["not_after"]}
+
+
+def _asn1_time(s):
+    s = s.strip()
+    if not s:
+        return None
+    fmt = "%y%m%d%H%M%SZ" if len(s) == 13 else "%Y%m%d%H%M%SZ"
+    return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc).isoformat()
+
+
+def v_crl_refresh():
+    """Regenerate the CRL if it expires within 365 days (an expired CRL rejects every client)."""
+    nxt = run(["openssl", "crl", "-in", CRL_LIVE, "-noout", "-nextupdate"]).stdout.strip().partition("=")[2]
+    exp = datetime.strptime(nxt, "%b %d %H:%M:%S %Y %Z").replace(tzinfo=timezone.utc)
+    left = (exp - datetime.now(timezone.utc)).days
+    if left < 365:
+        install_crl()
+        return {"ok": True, "regenerated": True, "days_left_before": left}
+    return {"ok": True, "regenerated": False, "days_left": left}
+
+
+# ---------------------------------------------------------------- management interface
+
+def _mgmt(cmd, timeout=5.0):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    s.connect(MGMT_SOCK)
+    buf = b""
+    try:
+        while b"\n" not in buf:  # banner
+            buf += s.recv(4096)
+        s.sendall(cmd.encode() + b"\n")
+        buf = b""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+            text = buf.decode(errors="replace")
+            if cmd.startswith("status"):
+                if "\nEND\r\n" in text or text.endswith("END\r\n"):
+                    break
+            elif re.search(r"^(SUCCESS|ERROR):.*\r\n", text, re.M):
+                break
+        s.sendall(b"quit\n")
+    finally:
+        s.close()
+    # drop asynchronous >INFO/>CLIENT notifications
+    return "\n".join(ln for ln in buf.decode(errors="replace").splitlines() if not ln.startswith(">"))
+
+
+def v_mgmt_status():
+    text = _mgmt("status 3")
+    clients = []
+    for line in text.splitlines():
+        f = line.split("\t")
+        if f[0] == "CLIENT_LIST" and len(f) >= 12:
+            clients.append({
+                "cn": f[1], "real_address": f[2], "vpn_ipv4": f[3], "vpn_ipv6": f[4],
+                "bytes_received": int(f[5]), "bytes_sent": int(f[6]),
+                "connected_since": int(f[8]), "client_id": int(f[10]), "cipher": f[12] if len(f) > 12 else "",
+            })
+    return {"ok": True, "clients": clients, "ts": int(time.time())}
+
+
+def _mgmt_kill_cn(cn):
+    try:
+        st = v_mgmt_status()
+    except OSError:
+        return 0
+    n = 0
+    for c in st["clients"]:
+        if c["cn"] == cn:
+            _mgmt(f"client-kill {c['client_id']} HALT")
+            n += 1
+    return n
+
+
+def v_mgmt_kill(client_id):
+    cid = int(client_id)
+    if cid < 0:
+        raise HelperError("bad client id")
+    res = _mgmt(f"client-kill {cid} HALT")
+    return {"ok": "SUCCESS" in res, "result": res.strip()[-200:]}
+
+
+# ---------------------------------------------------------------- nftables
+
+NFT_TEMPLATE = """#!/usr/sbin/nft -f
+# Generated by vpnpanel-helper — do not edit by hand.
+# This table only RESTRICTS VPN client traffic. UFW (iptables-nft) remains the
+# authoritative firewall; nothing here can open a port UFW blocks.
+table inet vpnpanel
+delete table inet vpnpanel
+table inet vpnpanel {{
+    set no_internet {{ type ipv4_addr; {no_internet} }}
+    set children {{ type ipv4_addr; {children} }}
+    set panel_admins {{ type ipv4_addr; {panel_admins} }}
+    set private4 {{ type ipv4_addr; flags interval;
+        elements = {{ 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
+                     172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3 }} }}
+
+    chain prerouting_nat {{
+        type nat hook prerouting priority dstnat; policy accept;
+        # Every VPN client must use the VPN resolver (prevents DNS leaks / bypass).
+        iifname "{vpn_if}" ip daddr != {server_ip} udp dport 53 counter dnat ip to {server_ip}
+        iifname "{vpn_if}" ip daddr != {server_ip} tcp dport 53 counter dnat ip to {server_ip}
+    }}
+
+    chain input {{
+        type filter hook input priority filter - 10; policy accept;
+        iifname "{vpn_if}" ip saddr != {vpn_net} counter drop
+        iifname "{vpn_if}" tcp dport {admin_port} ip saddr != @panel_admins counter reject with tcp reset
+        iifname "{vpn_if}" tcp dport {adguard_port} counter drop
+    }}
+
+    chain forward {{
+        type filter hook forward priority filter - 10; policy accept;
+        iifname "{vpn_if}" ip saddr != {vpn_net} counter drop
+        iifname "{vpn_if}" meta nfproto ipv6 counter reject with icmpx admin-prohibited
+        # Internet disabled / outside schedule / expired: VPN + DNS still work, no egress.
+        iifname "{vpn_if}" ip saddr @no_internet counter reject with icmpx admin-prohibited
+        # No VPN client may reach private ranges, other clients, or cloud metadata.
+        iifname "{vpn_if}" ip daddr @private4 counter reject with icmpx admin-prohibited
+        # Children: no DNS-over-TLS / DNS-over-QUIC bypass.
+        iifname "{vpn_if}" ip saddr @children tcp dport 853 counter reject with tcp reset
+        iifname "{vpn_if}" ip saddr @children udp dport 853 counter reject with icmpx admin-prohibited
+    }}
+}}
+"""
+
+
+def _elements(ips):
+    ips = sorted({check_client_ip(i) for i in ips}, key=lambda s: ipaddress.ip_address(s))
+    return f"elements = {{ {', '.join(ips)} }}" if ips else ""
+
+
+def v_nft_apply():
+    data = json.load(sys.stdin)
+    admins = list(data.get("panel_admins", []))
+    rendered = NFT_TEMPLATE.format(
+        no_internet=_elements(data.get("no_internet", [])),
+        children=_elements(data.get("children", [])),
+        panel_admins=_elements(admins),
+        vpn_if=VPN_IF, server_ip=SERVER_IP, vpn_net=VPN_NET, admin_port=int(CFG["ADMIN_PORT"]),
+        adguard_port=int(CFG["ADGUARD_URL"].rsplit(":", 1)[-1].split("/")[0] or 3080),
+    )
+    fd, tmp = tempfile.mkstemp(dir="/etc/vpnpanel", prefix=".nft-")
+    with os.fdopen(fd, "w") as f:
+        f.write(rendered)
+    run(["nft", "-c", "-f", tmp])  # syntax check first
+    run(["nft", "-f", tmp])        # atomic replace of our own table only
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, NFT_FILE)
+    return {"ok": True}
+
+
+def v_nft_counters():
+    p = run(["nft", "-j", "list", "table", "inet", "vpnpanel"], check=False)
+    return {"ok": p.returncode == 0, "json": json.loads(p.stdout) if p.returncode == 0 else None}
+
+
+# ---------------------------------------------------------------- health
+
+def v_health():
+    svc = {}
+    for s in SERVICES:
+        svc[s] = run(["systemctl", "is-active", s], check=False).stdout.strip()
+    ufw = run(["ufw", "status"], check=False).stdout
+    nat = run(["iptables", "-t", "nat", "-S", "POSTROUTING"], check=False).stdout
+    listen = run(["ss", "-Htln"], check=False).stdout
+    return {
+        "ok": True,
+        "services": svc,
+        "ufw_active": "Status: active" in ufw,
+        "nat_ok": f"-s {VPN_NET} -o {PUBLIC_IF} -j MASQUERADE" in nat,
+        "nat_rules": nat.count(f"-s {VPN_NET} -o {PUBLIC_IF} -j MASQUERADE"),
+        "listening_vpn": bool(re.search(rf":{int(CFG['VPN_PUBLIC_PORT'])}\s", listen)),
+        "ip_forward": read("/proc/sys/net/ipv4/ip_forward").strip() == "1",
+        "nft_table": run(["nft", "list", "table", "inet", "vpnpanel"], check=False).returncode == 0,
+    }
+
+
+VERBS = {
+    "issue": v_issue, "revoke": v_revoke,
+    "ccd-write": v_ccd_write, "ccd-delete": v_ccd_delete, "ccd-list": v_ccd_list,
+    "pki-list": v_pki_list, "crl-refresh": v_crl_refresh,
+    "mgmt-status": v_mgmt_status, "mgmt-kill": v_mgmt_kill,
+    "nft-apply": v_nft_apply, "nft-counters": v_nft_counters,
+    "health": v_health,
+}
+
+
+def main():
+    if os.geteuid() != 0:
+        fail("must run as root via sudo")
+    if len(sys.argv) < 2 or sys.argv[1] not in VERBS:
+        fail(f"usage: vpnpanel-helper {{{'|'.join(VERBS)}}} ...")
+    verb, args = sys.argv[1], sys.argv[2:]
+    if len(args) > 4 or any(len(a) > 200 for a in args):
+        fail("bad arguments")
+    try:
+        out(VERBS[verb](*args))
+    except HelperError as e:
+        fail(str(e))
+    except TypeError:
+        fail("wrong number of arguments")
+    except (OSError, ValueError, KeyError) as e:
+        fail(f"{type(e).__name__}: {e}"[:300], 3)
+
+
+if __name__ == "__main__":
+    main()

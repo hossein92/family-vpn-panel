@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% from "macros.html" import device_status, internet_badge, meter, type_badge with context %}
+{% block title %}Dashboard{% endblock %}
+{% block bodyattrs %} data-autorefresh="30"{% endblock %}
+{% block content %}
+{% set svc = snap.health.services or {} %}
+<div class="page-head">
+  <div><h1>Dashboard</h1><p>Family VPN at a glance · refreshes every 30 s</p></div>
+  <div class="actions">
+    <a class="btn" href="/members">Family members</a>
+    <a class="btn primary" href="/devices/new"><svg><use href="#i-plus"/></svg>Add device</a>
+  </div>
+</div>
+
+{% if live_error %}<div class="flash error">Cannot read live connections from OpenVPN: {{ live_error }}</div>{% endif %}
+{% if snap.health.error %}<div class="flash error">Health check failed: {{ snap.health.error }}</div>{% endif %}
+
+<div class="grid g4">
+  <div class="card stat">
+    <div class="label">OpenVPN service</div>
+    {% if svc.get('openvpn-server@server') == 'active' %}
+      <div class="value"><span class="badge b-good">Running</span></div>
+    {% else %}
+      <div class="value"><span class="badge b-bad">{{ svc.get('openvpn-server@server', 'unknown')|capitalize }}</span></div>
+    {% endif %}
+    <div class="sub">{{ cfg.protocol|upper }} {{ 'listening on' if snap.health.listening_vpn else 'NOT listening on' }} :{{ cfg.public_port }} · up {{ snap.uptime|duration }}</div>
+  </div>
+  <div class="card stat">
+    <div class="label"><span class="dot on"></span> Connected now</div>
+    <div class="value">{{ counts.online }}</div>
+    <div class="sub">of {{ counts.registered }} registered devices</div>
+  </div>
+  <div class="card stat">
+    <div class="label">Traffic today</div>
+    <div class="value">{{ today.total|bytes }}</div>
+    <div class="sub">↓ {{ today.tx|bytes }} · ↑ {{ today.rx|bytes }}</div>
+  </div>
+  <div class="card stat">
+    <div class="label">Traffic this month</div>
+    <div class="value">{{ month.total|bytes }}</div>
+    <div class="sub">↓ {{ month.tx|bytes }} · ↑ {{ month.rx|bytes }}</div>
+  </div>
+</div>
+
+<div class="grid g4">
+  <div class="card stat"><div class="label">CPU</div><div class="value">{{ snap.cpu }}%</div>
+    <div class="sub">load {{ '%.2f'|format(snap.load[0]) }} · {{ '%.2f'|format(snap.load[1]) }}</div>{{ meter(snap.cpu) }}</div>
+  <div class="card stat"><div class="label">Memory</div><div class="value">{{ snap.mem.percent }}%</div>
+    <div class="sub">{{ snap.mem.used|bytes }} of {{ snap.mem.total|bytes }}</div>{{ meter(snap.mem.percent) }}</div>
+  <div class="card stat"><div class="label">Disk</div><div class="value">{{ snap.disk.percent }}%</div>
+    <div class="sub">{{ snap.disk.used|bytes }} of {{ snap.disk.total|bytes }}</div>{{ meter(snap.disk.percent) }}</div>
+  <div class="card stat"><div class="label">Devices needing attention</div>
+    <div class="value">{{ counts.disabled + counts.revoked }}</div>
+    <div class="sub">{{ counts.disabled }} disabled/expired · {{ counts.revoked }} revoked · {{ counts.no_internet }} without internet</div></div>
+</div>
+
+<div class="grid g-2-1">
+  <div class="card">
+    <div class="card-head"><h2>Devices</h2><a class="small" href="/devices">All devices →</a></div>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Device</th><th>Status</th><th class="hide-sm">Internet</th><th class="hide-sm">VPN IP</th><th class="num">Last seen</th></tr></thead>
+      <tbody>
+      {% for r in rows if r.status != 'revoked' %}
+        <tr>
+          <td><a class="cell-title" href="/devices/{{ r.d.id }}">{{ r.d.display_name }}</a><div class="cell-sub">{{ r.m.name }}</div></td>
+          <td>{{ device_status(r) }}</td>
+          <td class="hide-sm">{{ internet_badge(r) }}</td>
+          <td class="hide-sm mono">{{ r.d.vpn_ipv4 }}</td>
+          <td class="num small">{{ 'now' if r.online else (r.d.last_seen|ago) }}</td>
+        </tr>
+      {% else %}
+        <tr class="empty-row"><td colspan="5" class="empty">No devices yet. <a href="/members">Add a family member</a>, then add their devices.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Server</h2>
+    <dl class="kv">
+      <dt>Public endpoint</dt><dd class="mono">{{ cfg.endpoint }}</dd>
+      <dt>VPN subnet</dt><dd class="mono">{{ cfg.subnet }}</dd>
+      <dt>DNS filter</dt><dd>{% if svc.get('adguardhome') == 'active' %}<span class="badge b-good">AdGuard Home</span>{% else %}<span class="badge b-bad">down</span>{% endif %}</dd>
+      <dt>Firewall</dt><dd>{% if snap.health.ufw_active and snap.health.nat_ok %}<span class="badge b-good">UFW + NAT OK</span>{% else %}<span class="badge b-bad">Check health</span>{% endif %}</dd>
+      <dt>Family members</dt><dd>{{ counts.members }}</dd>
+    </dl>
+    <p class="small muted" ><a href="/health">Full server health →</a></p>
+  </div>
+</div>
+
+<div class="grid g2">
+  <div class="card">
+    <div class="card-head"><h2>Recent connections</h2><a class="small" href="/connections">Live view →</a></div>
+    <ul class="list-plain">
+    {% for s in recent %}
+      <li>
+        <span><span class="dot {{ 'on' if not s.disconnected_at }}"></span>&nbsp;
+          {% if s.did %}<a href="/devices/{{ s.did }}">{{ s.display_name }}</a>{% else %}<span class="mono">{{ s.common_name }}</span>{% endif %}
+          <span class="muted small">{{ s.owner or 'unmanaged' }} · {{ s.real_address.rsplit(':', 1)[0] if s.real_address }}</span></span>
+        <span class="small muted nowrap">{{ 'connected ' ~ (s.connected_at|ago) if not s.disconnected_at else 'left ' ~ (s.disconnected_at|ago) }}</span>
+      </li>
+    {% else %}<li class="muted">No connections recorded yet.</li>{% endfor %}
+    </ul>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Recent admin actions</h2><a class="small" href="/audit">Audit log →</a></div>
+    <ul class="list-plain">
+    {% for a in actions %}
+      <li><span><b>{{ a.action }}</b> <span class="muted small">{{ a.target_label or '' }}</span></span>
+          <span class="small muted nowrap">{{ a.actor }} · {{ a.ts|ago }}</span></li>
+    {% else %}<li class="muted">Nothing yet.</li>{% endfor %}
+    </ul>
+  </div>
+</div>
+{% endblock %}

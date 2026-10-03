@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input, type_badge with context %}
+{% block title %}Schedule · {{ m.name }}{% endblock %}
+{% macro dayboxes(selected, row=none) -%}
+<div class="days">{% for name in days %}<label><input type="checkbox" data-name="days" {% if row is not none %}name="w{{ row }}_days"{% endif %} value="{{ loop.index0 }}" {{ 'checked' if loop.index0 in selected }}><span>{{ name }}</span></label>{% endfor %}</div>
+{%- endmacro %}
+{% block content %}
+<div class="page-head">
+  <div><p class="small"><a href="/schedules">← Access schedules</a></p><h1>{{ m.name }} — internet schedule</h1>
+    <p>Policy: {{ pol.name }}{% if pol.enforce_schedule %} (requires a schedule){% endif %}</p></div>
+</div>
+
+<div class="callout {{ 'warn' if not st.allowed }}">
+  Right now: <b>{{ 'allowed' if st.allowed else 'blocked' }}</b> — {{ st.reason }}{% if st.next_change and not st.override %}; changes {{ st.next_change|ago }} ({{ st.next_change|dt('%a %H:%M') }} {{ tz }}){% endif %}.
+</div>
+
+<div class="grid g-2-1">
+  <form class="card" method="post" action="/schedules/{{ m.id }}">
+    {{ csrf_input() }}
+    <h2>Allowed hours</h2>
+    <label class="check"><input type="checkbox" name="enabled" {{ 'checked' if (row and row.enabled) or not row }}><div><b>Schedule enabled</b><span>Unchecked = internet at any time{% if pol.enforce_schedule %} (but this policy then applies its default schedule){% endif %}.</span></div></label>
+    <div class="field"><label for="tz">Timezone</label>
+      <select id="tz" name="timezone">{% for z in timezones %}<option value="{{ z }}" {{ 'selected' if z == (row.timezone if row else default_tz) }}>{{ z }}</option>{% endfor %}</select>
+      <div class="hint">Times below are local to this zone; daylight saving is handled automatically. The server itself runs on UTC.</div></div>
+    <div class="actions presets">
+      <span class="small muted">Presets:</span>
+      <button type="button" class="btn sm" data-preset='[{"days":[0,1,2,3,4],"start":"06:30","end":"21:30"},{"days":[5,6],"start":"07:30","end":"22:30"}]'>School days</button>
+      <button type="button" class="btn sm" data-preset='[{"days":[0,1,2,3,4,5,6],"start":"06:30","end":"22:00"}]'>06:30–22:00 daily</button>
+      <button type="button" class="btn sm" data-preset='[{"days":[0,1,2,3,4],"start":"07:00","end":"08:00"},{"days":[0,1,2,3,4],"start":"15:00","end":"20:00"},{"days":[5,6],"start":"09:00","end":"21:00"}]'>Strict</button>
+    </div>
+    <div id="window-rows">
+      {% for w in windows %}
+      <div class="window-row">
+        {{ dayboxes(w.days, loop.index0) }}
+        <input type="time" data-name="start" name="w{{ loop.index0 }}_start" value="{{ w.start }}" aria-label="From" required>
+        <input type="time" data-name="end" name="w{{ loop.index0 }}_end" value="{{ w.end }}" aria-label="Until" required>
+        <button type="button" class="btn sm ghost" data-remove-row aria-label="Remove">✕</button>
+      </div>
+      {% endfor %}
+    </div>
+    <template id="window-template">
+      <div class="window-row">
+        {{ dayboxes([]) }}
+        <input type="time" data-name="start" aria-label="From" required>
+        <input type="time" data-name="end" aria-label="Until" required>
+        <button type="button" class="btn sm ghost" data-remove-row aria-label="Remove">✕</button>
+      </div>
+    </template>
+    <p class="small muted">A window ending before it starts runs past midnight (e.g. 20:00–01:00).</p>
+    <div class="actions"><button type="button" class="btn sm" id="add-window"><svg><use href="#i-plus"/></svg>Add window</button>
+      <button class="btn primary" type="submit">Save schedule</button></div>
+  </form>
+
+  <div class="card">
+    <h2>Temporary override</h2>
+    <p class="small muted">Applies immediately to all of {{ m.name }}’s devices and ends automatically.</p>
+    <form method="post" action="/schedules/{{ m.id }}/override">
+      {{ csrf_input() }}
+      <div class="field"><label>Action</label>
+        <div class="seg"><input type="radio" id="k1" name="kind" value="allow" checked><label for="k1">Allow extra time</label>
+          <input type="radio" id="k2" name="kind" value="block"><label for="k2">Pause internet</label></div></div>
+      <div class="field"><label for="mins">For</label>
+        <select id="mins" name="minutes">{% for v, l in [(15,'15 minutes'),(30,'30 minutes'),(60,'1 hour'),(90,'1.5 hours'),(120,'2 hours'),(180,'3 hours'),(480,'8 hours')] %}<option value="{{ v }}" {{ 'selected' if v == 60 }}>{{ l }}</option>{% endfor %}</select></div>
+      <div class="field"><label for="note">Note <span class="muted">(optional)</span></label><input id="note" type="text" name="note" maxlength="200" placeholder="homework"></div>
+      <button class="btn primary" type="submit">Apply override</button>
+    </form>
+    {% if st.override %}
+    <form method="post" action="/schedules/{{ m.id }}/override/cancel" class="cancel-ov">{{ csrf_input() }}<button class="btn sm" type="submit">Cancel current override</button></form>
+    {% endif %}
+    <h3 class="ov-head">Recent overrides</h3>
+    <ul class="list-plain small">
+    {% for o in overrides %}
+      <li><span>{{ 'Extra time' if o.kind == 'allow' else 'Paused' }} until {{ o.expires_at|dt('%a %H:%M') }}{% if o.note %} · {{ o.note }}{% endif %}</span>
+        <span class="muted">{% if o.cancelled_at %}cancelled{% elif o.expires_at > now %}<span class="badge b-accent">active</span>{% else %}ended{% endif %} · {{ o.created_by }}</span></li>
+    {% else %}<li class="muted">None.</li>{% endfor %}
+    </ul>
+  </div>
+</div>
+{% endblock %}

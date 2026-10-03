@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Audit log{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Audit log</h1><p>Every sensitive action, newest first. Never contains private keys or passwords. {{ '{:,}'.format(total) }} entries.</p></div>
+</div>
+<div class="card">
+  <form method="get" class="table-tools">
+    <select name="action" data-autosubmit aria-label="Category">
+      <option value="">All categories</option>
+      {% for a in actions if a %}<option value="{{ a }}." {{ 'selected' if action == a ~ '.' }}>{{ a }}</option>{% endfor %}
+    </select>
+    <div class="search"><svg><use href="#i-search"/></svg><input type="search" name="q" value="{{ q }}" placeholder="Search actor, target, details, IP…"></div>
+    <button class="btn sm" type="submit">Filter</button>
+  </form>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th class="hide-sm">Details</th><th class="hide-sm">IP</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      {% set det = loads(r.details) %}
+      <tr>
+        <td class="small nowrap">{{ r.ts|dt('%Y-%m-%d %H:%M:%S') }}</td>
+        <td class="small">{{ r.actor }}</td>
+        <td><span class="badge plain {{ 'b-bad' if 'revoked' in r.action or 'failed' in r.action or 'locked' in r.action else 'b-accent' if r.action.startswith('admin.login') else '' }}">{{ r.action }}</span></td>
+        <td class="small">{% if r.target_type == 'device' and r.target_id %}<a href="/devices/{{ r.target_id }}">{{ r.target_label }}</a>{% elif r.target_type == 'member' and r.target_id %}<a href="/members/{{ r.target_id }}">{{ r.target_label }}</a>{% elif r.target_type == 'policy' and r.target_id %}<a href="/policies/{{ r.target_id }}">{{ r.target_label }}</a>{% else %}{{ r.target_label or '' }}{% endif %}</td>
+        <td class="small mono hide-sm">{% for k, v in det.items() %}{{ k }}={{ v if v is not mapping else '…' }}{{ ' · ' if not loop.last }}{% endfor %}</td>
+        <td class="small mono hide-sm">{{ r.ip or '' }}</td>
+      </tr>
+    {% else %}<tr class="empty-row"><td colspan="6" class="empty">No entries.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if pages > 1 %}
+  <div class="actions pager">
+    {% if page > 1 %}<a class="btn sm" href="?page={{ page - 1 }}&q={{ q|urlq }}&action={{ action|urlq }}">← Newer</a>{% endif %}
+    <span class="muted small">Page {{ page }} of {{ pages }}</span>
+    {% if page < pages %}<a class="btn sm" href="?page={{ page + 1 }}&q={{ q|urlq }}&action={{ action|urlq }}">Older →</a>{% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

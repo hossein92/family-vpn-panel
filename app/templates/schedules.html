@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input, type_badge, avatar with context %}
+{% block title %}Access schedules{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div><h1>Access schedules</h1><p>Allowed internet hours per person, enforced at the firewall for all their devices. Outside these hours the VPN stays connected but nothing reaches the internet.</p></div>
+</div>
+<div class="grid g2">
+{% for it in items %}
+  {% set m = it.m %}{% set st = it.st %}
+  <div class="card">
+    <div class="card-head">
+      <div class="who-inline">{{ avatar(m.name, m.type) }} <a class="cell-title" href="/members/{{ m.id }}">{{ m.name }}</a> {{ type_badge(m.type) }}</div>
+      {% if st.windows or st.override %}
+        {% if st.allowed %}<span class="badge b-good">Internet allowed</span>{% else %}<span class="badge b-warn">Internet blocked</span>{% endif %}
+      {% else %}<span class="badge plain">No schedule</span>{% endif %}
+    </div>
+    <p class="small">
+      {% if st.windows %}<b>{{ describe(st.windows) }}</b> <span class="muted">({{ st.tz }}{{ ', policy default' if st.source == 'policy-default' }})</span><br>{% endif %}
+      <span class="muted">{{ st.reason }}{% if st.next_change and not st.override %} · changes {{ st.next_change|ago }} at {{ st.next_change|dt('%a %H:%M') }}{% endif %}</span>
+    </p>
+    <div class="actions">
+      <a class="btn sm" href="/schedules/{{ m.id }}">{{ 'Edit schedule' if it.row else 'Set schedule' }}</a>
+      {% if it.devices %}
+      {% if st.override %}
+        <form method="post" action="/schedules/{{ m.id }}/override/cancel" class="inline">{{ csrf_input() }}<button class="btn sm" type="submit">Cancel override</button></form>
+      {% endif %}
+      {% for mins in [30, 60, 120] %}
+        <form method="post" action="/schedules/{{ m.id }}/override" class="inline">{{ csrf_input() }}<input type="hidden" name="kind" value="allow"><input type="hidden" name="minutes" value="{{ mins }}">
+          <button class="btn sm" type="submit">+{{ mins }} min</button></form>
+      {% endfor %}
+      <form method="post" action="/schedules/{{ m.id }}/override" class="inline" data-confirm="Pause internet for {{ m.name }} for 60 minutes?" data-confirm-ok="Pause" data-confirm-danger="0">
+        {{ csrf_input() }}<input type="hidden" name="kind" value="block"><input type="hidden" name="minutes" value="60"><button class="btn sm danger" type="submit">Pause 1 h</button></form>
+      {% endif %}
+    </div>
+  </div>
+{% else %}
+  <div class="card empty">No family members yet.</div>
+{% endfor %}
+</div>
+{% endblock %}

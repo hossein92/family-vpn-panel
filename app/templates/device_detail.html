@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+{% from "macros.html" import csrf_input, type_badge, device_status, internet_badge, bar_chart with context %}
+{% block title %}{{ d.display_name }}{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <p class="small"><a href="/members/{{ r.m.id }}">← {{ r.m.name }}</a></p>
+    <h1>{{ d.display_name }}</h1>
+    <div class="chips">{{ device_status(r) }} {{ internet_badge(r) }} <span class="badge plain mono">{{ d.common_name }}</span> <span class="badge plain mono">{{ d.vpn_ipv4 }}</span></div>
+  </div>
+  {% if not d.revoked %}
+  <div class="actions">
+    {% if r.online %}
+    <form method="post" action="/devices/{{ d.id }}/disconnect" class="inline" data-confirm="Disconnect {{ d.display_name }} now? The VPN app will stop; the user can reconnect manually."
+          data-confirm-ok="Disconnect" data-confirm-danger="0">{{ csrf_input() }}<button class="btn" type="submit">Disconnect</button></form>
+    {% endif %}
+    <form method="post" action="/devices/{{ d.id }}/internet" class="inline">{{ csrf_input() }}
+      <button class="btn" type="submit">{{ 'Turn internet off' if d.internet_enabled else 'Turn internet on' }}</button></form>
+    {% if d.enabled %}
+    <form method="post" action="/devices/{{ d.id }}/disable" class="inline" data-confirm="Disable {{ d.display_name }}? It is disconnected and cannot connect until re-enabled. The certificate stays valid."
+          data-confirm-ok="Disable">{{ csrf_input() }}<button class="btn danger" type="submit">Disable</button></form>
+    {% else %}
+    <form method="post" action="/devices/{{ d.id }}/enable" class="inline">{{ csrf_input() }}<button class="btn primary" type="submit">Re-enable</button></form>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+{% if d.revoked %}
+<div class="flash error">This device’s certificate was revoked {{ d.revoked_at|dt }} and is listed in the CRL. OpenVPN rejects it. History is kept below.</div>
+{% elif r.status == 'expired' %}
+<div class="flash error">This device has expired ({{ (d.expires_at or d.certificate_not_after)|dt }}). Extend the expiry date and regenerate the profile, or create a new device.</div>
+{% endif %}
+
+{% if not d.revoked %}
+<div class="card big-download">
+  <div>
+    <h2>VPN profile — {{ d.common_name }}.ovpn</h2>
+    {% if profile_ready %}
+      <p class="small">Available until {{ d.profile_available_until|dt }} ({{ d.profile_available_until|ago }}) · downloaded {{ d.profile_downloads }}×.
+      Import it into OpenVPN Connect (iOS/Android/Windows/macOS) or Tunnelblick on <b>this device only</b>.</p>
+    {% else %}
+      <p class="small">The download window has closed — the server does not keep private keys. Regenerate to issue a fresh certificate; the old profile stops working.</p>
+    {% endif %}
+  </div>
+  <div class="actions">
+    {% if profile_ready %}
+    <form method="post" action="/devices/{{ d.id }}/profile" class="inline">{{ csrf_input() }}
+      <button class="btn primary" type="submit"><svg><use href="#i-download"/></svg>Download .ovpn</button></form>
+    {% endif %}
+    <form method="post" action="/devices/{{ d.id }}/reissue" class="inline" data-confirm="Issue a new certificate for {{ d.display_name }}? The current profile is revoked immediately and stops working; you then install the new file."
+          data-confirm-ok="Regenerate">{{ csrf_input() }}<button class="btn" type="submit">Regenerate profile</button></form>
+  </div>
+</div>
+{% endif %}
+
+<div class="grid g3">
+  <div class="card stat"><div class="label">Connection</div>
+    <div class="value">{% if r.online %}<span class="badge b-good">Online</span>{% else %}<span class="badge">Offline</span>{% endif %}</div>
+    <div class="sub">{% if r.online %}connected {{ d.last_connected_at|ago }} from {{ r.live.real_address.rsplit(':',1)[0] }}{% else %}last seen {{ d.last_seen|ago }}{% endif %}</div></div>
+  <div class="card stat"><div class="label">Traffic this month</div><div class="value">{{ month.total|bytes }}</div>
+    <div class="sub">↓ {{ month.tx|bytes }} to device · ↑ {{ month.rx|bytes }} from device</div></div>
+  <div class="card stat"><div class="label">Internet</div>
+    <div class="value">{% if r.internet %}<span class="badge b-good">Allowed</span>{% elif r.status == 'active' %}<span class="badge b-warn">Blocked</span>{% else %}—{% endif %}</div>
+    <div class="sub">{{ r.internet_reason }}{% if r.schedule.next_change %} · changes {{ r.schedule.next_change|ago }}{% endif %}</div></div>
+</div>
+
+<div class="grid g-2-1">
+  <div class="card">
+    <div class="card-head"><h2>Daily traffic</h2><span class="muted small">last 14 days · {{ tz }}</span></div>
+    {{ bar_chart(daily, 170, "Daily traffic") }}
+  </div>
+  <div class="card">
+    <h2>Details</h2>
+    <dl class="kv small">
+      <dt>Owner</dt><dd><a href="/members/{{ r.m.id }}">{{ r.m.name }}</a> {{ type_badge(r.m.type) }}</dd>
+      <dt>Policy</dt><dd><a href="/policies/{{ r.p.id }}">{{ r.p.name }}</a>{% if not d.policy_id %} <span class="muted">(from owner)</span>{% endif %}</dd>
+      <dt>Common name</dt><dd class="mono">{{ d.common_name }}</dd>
+      <dt>VPN IPv4</dt><dd class="mono">{{ d.vpn_ipv4 }}</dd>
+      <dt>Cert serial</dt><dd class="mono">{{ d.certificate_serial or '—' }}</dd>
+      <dt>Cert valid until</dt><dd>{{ d.certificate_not_after|dt('%Y-%m-%d') }}</dd>
+      <dt>Expires</dt><dd>{{ d.expires_at|dt if d.expires_at else 'never' }}</dd>
+      <dt>Last public IP</dt><dd class="mono">{{ d.last_connected_ip or '—' }}</dd>
+      <dt>Last connected</dt><dd>{{ d.last_connected_at|dt }}</dd>
+      <dt>Created</dt><dd>{{ d.created_at|dt }}{% if d.imported %} · imported{% endif %}</dd>
+      <dt>Admin panel</dt><dd>{{ 'allowed' if d.panel_access else 'no' }}</dd>
+    </dl>
+  </div>
+</div>
+
+{% if not d.revoked %}
+<div class="grid g2">
+  <form class="card" method="post" action="/devices/{{ d.id }}/update">
+    {{ csrf_input() }}
+    <h2>Settings</h2>
+    <div class="row">
+      <div class="field"><label for="dn">Display name</label><input id="dn" type="text" name="display_name" value="{{ d.display_name }}" maxlength="80"></div>
+      <div class="field"><label for="ow">Owner</label>
+        <select id="ow" name="member_id">{% for m in members %}<option value="{{ m.id }}" {{ 'selected' if m.id == d.family_member_id }}>{{ m.name }}</option>{% endfor %}</select></div>
+    </div>
+    <div class="row">
+      <div class="field"><label for="pp">Policy</label>
+        <select id="pp" name="policy_id"><option value="">Inherit from owner</option>
+          {% for p in policies %}<option value="{{ p.id }}" {{ 'selected' if p.id == d.policy_id }}>{{ p.name }}</option>{% endfor %}</select></div>
+      <div class="field"><label for="ex">Expires on</label>
+        <input id="ex" type="date" name="expires_on" value="{{ d.expires_at|dt('%Y-%m-%d') if d.expires_at else '' }}">
+        <div class="hint">Leave empty for no expiry. The certificate’s own date ({{ d.certificate_not_after|dt('%Y-%m-%d') }}) still applies; regenerate after extending past it.</div></div>
+    </div>
+    {% if r.m.type == 'ADULT' %}
+    <label class="check"><input type="checkbox" name="panel_access" {{ 'checked' if d.panel_access }}><div><b>May open this admin panel</b><span>Allows this device to reach {{ cfg.admin_url }} (login still required).</span></div></label>
+    {% endif %}
+    <div class="field"><label for="nt">Notes</label><input id="nt" type="text" name="notes" value="{{ d.notes }}" maxlength="500"></div>
+    <button class="btn primary" type="submit">Save</button>
+  </form>
+
+  <div class="card">
+    <h2>Revoke certificate</h2>
+    <p class="small muted">Permanent. The certificate is added to the CRL, the device is disconnected and can never connect with this profile again. History stays visible. To use the device again later, create a new device.</p>
+    <form method="post" action="/devices/{{ d.id }}/revoke" data-confirm="Revoke {{ d.common_name }} permanently? This cannot be undone." data-confirm-title="Revoke certificate" data-confirm-ok="Revoke">
+      {{ csrf_input() }}
+      <div class="field"><label for="rr">Reason</label>
+        <select id="rr" name="reason">
+          <option value="cessationOfOperation">Device no longer used</option>
+          <option value="keyCompromise">Lost / stolen / profile leaked</option>
+          <option value="affiliationChanged">Owner left the family plan</option>
+          <option value="unspecified">Other</option>
+        </select></div>
+      <div class="field"><label for="cc">Type <code>{{ d.common_name }}</code> to confirm</label>
+        <input id="cc" type="text" name="confirm_cn" autocomplete="off" autocapitalize="none" spellcheck="false" data-must-equal="{{ d.common_name }}" data-target="#revoke-btn"></div>
+      <button class="btn danger-solid" id="revoke-btn" type="submit">Revoke certificate</button>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+<div class="grid g2">
+  <div class="card">
+    <div class="card-head"><h2>Connection history</h2></div>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Connected</th><th>Duration</th><th class="hide-sm">From</th><th class="num">Traffic</th></tr></thead>
+      <tbody>
+      {% for s in sessions %}
+        <tr><td class="small">{{ s.connected_at|dt }}{% if not s.disconnected_at %} <span class="badge b-good">live</span>{% endif %}</td>
+            <td class="small">{{ session_duration(s)|duration }}</td>
+            <td class="small mono hide-sm">{{ s.real_address.rsplit(':',1)[0] if s.real_address }}</td>
+            <td class="num small">{{ (s.bytes_received + s.bytes_sent)|bytes }}</td></tr>
+      {% else %}<tr class="empty-row"><td colspan="4" class="empty">No connections yet.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head"><h2>Recent DNS lookups</h2><a class="small" href="/dns?device={{ d.id }}">Full log →</a></div>
+    <p class="small muted">Domain names only, from the DNS filter. No page content, messages or HTTPS data is ever seen.</p>
+    {% if q_err %}<div class="flash error">{{ q_err }}</div>{% endif %}
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Time</th><th>Domain</th><th>Result</th></tr></thead>
+      <tbody>
+      {% for e in queries[:25] %}
+        <tr><td class="small nowrap">{{ e.time|dt('%H:%M:%S') }}</td><td class="small mono">{{ e.question.name }}</td>
+            <td>{% if e.reason.startswith('Filtered') and e.reason != 'FilteredSafeSearch' %}<span class="badge b-bad">Blocked</span>{% elif e.reason == 'FilteredSafeSearch' %}<span class="badge b-info">SafeSearch</span>{% else %}<span class="badge plain">OK</span>{% endif %}</td></tr>
+      {% else %}<tr class="empty-row"><td colspan="3" class="empty">No lookups recorded.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Certificate history</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Serial</th><th>Status</th><th>Issued</th><th>Valid until</th><th>Revoked</th></tr></thead>
+    <tbody>
+    {% for c in certs %}
+      <tr><td class="mono small">{{ c.serial }}</td>
+          <td>{% if c.status == 'valid' %}<span class="badge b-good">Valid</span>{% else %}<span class="badge b-bad">{{ c.status|capitalize }}</span>{% endif %}</td>
+          <td class="small">{{ c.issued_at|dt }}</td><td class="small">{{ c.not_after|dt('%Y-%m-%d') }}</td>
+          <td class="small">{{ c.revoked_at|dt if c.revoked_at else '—' }}{% if c.revoke_reason %} · {{ c.revoke_reason }}{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endblock %}

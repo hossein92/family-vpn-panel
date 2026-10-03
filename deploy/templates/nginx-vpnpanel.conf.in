@@ -1,0 +1,45 @@
+# Family VPN Panel — HTTPS reverse proxy (rendered by deploy/install.sh).
+# Listens ONLY on the admin bind address and loopback — never on a public IP.
+# OpenVPN keeps exclusive ownership of its public port.
+
+limit_req_zone $binary_remote_addr zone=vpnpanel_login:1m rate=10r/m;
+
+server {
+    listen @ADMIN_BIND_HOST@:@ADMIN_PORT@ ssl http2;
+    listen 127.0.0.1:@ADMIN_PORT@ ssl http2;
+    server_name @ADMIN_BIND_HOST@ @ADMIN_DNS_NAME@ 127.0.0.1;
+
+    ssl_certificate     /etc/vpnpanel/tls/panel.crt;
+    ssl_certificate_key /etc/vpnpanel/tls/panel.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:vpnpanel:1m;
+    ssl_session_tickets off;
+
+    server_tokens off;
+    client_max_body_size 256k;
+    access_log /var/log/nginx/vpnpanel.access.log;
+    error_log  /var/log/nginx/vpnpanel.error.log warn;
+
+    # Defence in depth (UFW + nftables already restrict this port).
+    allow @VPN_IPV4_SUBNET@;
+    allow 127.0.0.1;
+    deny all;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+
+    location /internal/ { return 404; }
+
+    location = /login {
+        limit_req zone=vpnpanel_login burst=5 nodelay;
+        limit_req_status 429;
+        proxy_pass http://127.0.0.1:@APP_PORT@;
+        include /etc/nginx/vpnpanel-proxy.conf;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:@APP_PORT@;
+        include /etc/nginx/vpnpanel-proxy.conf;
+    }
+}

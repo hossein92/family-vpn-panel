@@ -1,0 +1,54 @@
+#!/bin/bash
+# vpn-nstest — run real OpenVPN clients in isolated network namespaces on the
+# VPN server itself (testing only), connecting to the public endpoint like a device would.
+#
+#   vpn-nstest up   <name> <profile.ovpn>   create netns + start client
+#   vpn-nstest exec <name> <cmd...>         run a command inside the client netns
+#   vpn-nstest log  <name>                  show the client log
+#   vpn-nstest down <name>                  stop client + remove netns
+#
+# The netns has no route of its own except via a /30 veth to the host, so
+# everything after "Initialization Sequence Completed" goes through the tunnel.
+set -euo pipefail
+[ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
+cmd=${1:-}; name=${2:-}
+[[ "$name" =~ ^[a-z0-9]{1,8}$ ]] || { echo "name must be [a-z0-9]{1,8}" >&2; exit 1; }
+ns="vt-$name"; dir=/run/vpn-nstest/$name
+idx=$(( $(printf '%s' "$name" | cksum | cut -d' ' -f1) % 60 ))
+hostip="192.168.250.$((idx*4+1))"; nsip="192.168.250.$((idx*4+2))"
+
+case "$cmd" in
+up)
+  profile=${3:?profile}
+  mkdir -p "$dir" /etc/netns/$ns; chmod 700 "$dir"
+  ip netns add "$ns"
+  ip link add "vh-$name" type veth peer name "vn-$name"
+  ip link set "vn-$name" netns "$ns"
+  ip addr add "$hostip/30" dev "vh-$name"; ip link set "vh-$name" up
+  ip -n "$ns" addr add "$nsip/30" dev "vn-$name"
+  ip -n "$ns" link set lo up; ip -n "$ns" link set "vn-$name" up
+  ip -n "$ns" route add default via "$hostip"
+  # Pushed DNS on Linux needs a hook; emulate it statically for the namespace.
+  resolver=$(sed -n 's/^VPN_SERVER_ADDRESS=//p' /etc/vpnpanel/panel.env 2>/dev/null | tr -d '"')
+  echo "nameserver ${resolver:-10.8.0.1}" > /etc/netns/$ns/resolv.conf
+  ip netns exec "$ns" openvpn --config "$profile" --daemon "ovpn-$name" \
+     --log "$dir/client.log" --writepid "$dir/pid" --script-security 1
+  for _ in $(seq 1 90); do
+    grep -q "Initialization Sequence Completed" "$dir/client.log" 2>/dev/null && { echo "$name: connected"; exit 0; }
+    grep -qE "AUTH_FAILED|TLS Error|SIGTERM|Exiting due to fatal error" "$dir/client.log" 2>/dev/null && break
+    sleep 1
+  done
+  echo "$name: NOT connected"; tail -5 "$dir/client.log"; exit 2 ;;
+exec)
+  shift 2; ip netns exec "$ns" "$@" ;;
+log)
+  cat "$dir/client.log" ;;
+down)
+  [ -f "$dir/pid" ] && kill "$(cat "$dir/pid")" 2>/dev/null || true
+  sleep 1
+  ip netns del "$ns" 2>/dev/null || true
+  ip link del "vh-$name" 2>/dev/null || true
+  rm -rf "/etc/netns/$ns" "$dir"
+  echo "$name: down" ;;
+*) sed -n '2,12p' "$0"; exit 1 ;;
+esac

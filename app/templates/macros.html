@@ -1,0 +1,65 @@
+{% macro csrf_input() %}<input type="hidden" name="csrf_token" value="{{ csrf }}">{% endmacro %}
+
+{% macro type_badge(t) -%}
+  {%- if t == 'ADULT' %}<span class="badge plain b-accent">Adult</span>
+  {%- elif t == 'CHILD' %}<span class="badge plain b-warn">Child</span>
+  {%- else %}<span class="badge plain">Guest</span>{% endif -%}
+{%- endmacro %}
+
+{% macro device_status(r) -%}
+  {%- set s = r.status -%}
+  {%- if s == 'revoked' %}<span class="badge b-bad">Revoked</span>
+  {%- elif s == 'expired' %}<span class="badge b-bad">Expired</span>
+  {%- elif s == 'disabled' %}<span class="badge b-warn">Disabled</span>
+  {%- elif s == 'owner-disabled' %}<span class="badge b-warn">Owner paused</span>
+  {%- elif r.online %}<span class="badge b-good">Online</span>
+  {%- else %}<span class="badge">Offline</span>{% endif -%}
+{%- endmacro %}
+
+{% macro internet_badge(r) -%}
+  {%- if r.status != 'active' %}<span class="muted">—</span>
+  {%- elif r.internet %}<span class="badge plain b-good" title="{{ r.internet_reason }}">Internet on</span>
+  {%- else %}<span class="badge plain b-warn" title="{{ r.internet_reason }}">No internet</span>{% endif -%}
+{%- endmacro %}
+
+{% macro avatar(name, t) -%}
+<span class="avatar {{ 'child' if t == 'CHILD' else 'guest' if t == 'GUEST' }}" aria-hidden="true">{{ name[:1]|upper }}</span>
+{%- endmacro %}
+
+{% macro meter(pct) -%}
+<progress class="meter {{ 'bad' if pct >= 90 else 'warn' if pct >= 75 }}" value="{{ [pct, 100]|min }}" max="100">{{ pct }}%</progress>
+{%- endmacro %}
+
+{# Single-series bar chart (traffic). series: [{label, day, total, rx, tx}] #}
+{% macro bar_chart(series, height=180, title="Traffic") -%}
+{%- set w = 720 -%}{%- set pad_l = 72 -%}{%- set pad_b = 24 -%}{%- set pad_t = 8 -%}
+{%- set n = series|length -%}
+{%- set mx = (series|map(attribute='total')|max) if n else 0 -%}
+{%- if mx <= 0 %}<div class="empty">No traffic recorded in this period yet.</div>{% else -%}
+{%- set slot = (w - pad_l) / (n if n else 1) -%}
+{%- set bw = [slot - 2, 2]|max -%}
+{%- set ch = height - pad_b - pad_t -%}
+<svg class="chart" viewBox="0 0 {{ w }} {{ height }}" role="img" aria-label="{{ title }} bar chart">
+  {%- for frac in [0, 0.5, 1] %}
+  {%- set y = pad_t + ch - ch * frac %}
+  <line class="grid-line" x1="{{ pad_l }}" x2="{{ w }}" y1="{{ y }}" y2="{{ y }}"/>
+  <text x="{{ pad_l - 8 }}" y="{{ y + 4 }}" text-anchor="end">{{ (mx * frac)|bytes if frac else '0' }}</text>
+  {%- endfor %}
+  {%- for p in series %}
+  {%- set bh = (ch * p.total / mx) if p.total else 0 %}
+  {%- set x = pad_l + loop.index0 * slot + 1 %}
+  <g>
+    <title>{{ p.day }} — {{ p.total|bytes }} (↓ {{ p.tx|bytes }} to devices · ↑ {{ p.rx|bytes }} from devices)</title>
+    <rect x="{{ x }}" y="{{ pad_t }}" width="{{ bw }}" height="{{ ch }}" fill="transparent"/>
+    {%- if bh > 0 %}
+    {%- set r = [4, bw / 2, bh]|min %}
+    <path class="bar" d="M{{ x }},{{ pad_t + ch }} V{{ pad_t + ch - bh + r }} Q{{ x }},{{ pad_t + ch - bh }} {{ x + r }},{{ pad_t + ch - bh }} H{{ x + bw - r }} Q{{ x + bw }},{{ pad_t + ch - bh }} {{ x + bw }},{{ pad_t + ch - bh + r }} V{{ pad_t + ch }} Z"/>
+    {%- endif %}
+  </g>
+  {%- if n <= 16 or loop.index0 % ((n // 10) + 1) == 0 %}
+  <text x="{{ x + bw / 2 }}" y="{{ height - 6 }}" text-anchor="middle">{{ p.label }}</text>
+  {%- endif %}
+  {%- endfor %}
+</svg>
+{%- endif %}
+{%- endmacro %}
