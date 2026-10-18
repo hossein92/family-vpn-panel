@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 ENV_FILE = "/etc/vpnpanel/panel.env"
 MGMT_SOCK = "/run/openvpn-server/management.sock"
 NFT_FILE = "/etc/vpnpanel/vpnpanel.nft"
+NFT_DIR = "/etc/vpnpanel"
 
 
 def read_env_file(path):
@@ -340,7 +341,10 @@ def _mgmt(cmd, timeout=5.0):
     buf = b""
     try:
         while b"\n" not in buf:  # banner
-            buf += s.recv(4096)
+            chunk = s.recv(4096)
+            if not chunk:  # OpenVPN closed the socket (e.g. restarting): never spin as root
+                raise ConnectionError("management interface closed the connection")
+            buf += chunk
         s.sendall(cmd.encode() + b"\n")
         buf = b""
         deadline = time.time() + timeout
@@ -458,13 +462,17 @@ def v_nft_apply():
         vpn_if=VPN_IF, server_ip=SERVER_IP, vpn_net=VPN_NET, admin_port=int(CFG["ADMIN_PORT"]),
         adguard_port=int(CFG["ADGUARD_URL"].rsplit(":", 1)[-1].split("/")[0] or 3080),
     )
-    fd, tmp = tempfile.mkstemp(dir="/etc/vpnpanel", prefix=".nft-")
-    with os.fdopen(fd, "w") as f:
-        f.write(rendered)
-    run(["nft", "-c", "-f", tmp])  # syntax check first
-    run(["nft", "-f", tmp])        # atomic replace of our own table only
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, NFT_FILE)
+    fd, tmp = tempfile.mkstemp(dir=NFT_DIR, prefix=".nft-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(rendered)
+        run(["nft", "-c", "-f", tmp])  # syntax check first
+        run(["nft", "-f", tmp])        # atomic replace of our own table only
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, NFT_FILE)
+    finally:
+        if os.path.exists(tmp):  # never leave rendered rulesets behind after a failure
+            os.unlink(tmp)
     return {"ok": True}
 
 

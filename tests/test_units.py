@@ -150,3 +150,61 @@ def test_helper_env_reader(helper, tmp_path):
 def test_helper_output_is_json(helper, capsys):
     helper.out({"ok": True})
     assert json.loads(capsys.readouterr().out) == {"ok": True}
+
+
+# ---------------------------------------------------------------- root helper hardening (regressions)
+
+def _closing_unix_server(path):
+    """A management socket that accepts and immediately closes (OpenVPN restarting)."""
+    import socket as _s
+    import threading
+    srv = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+    srv.bind(str(path))
+    srv.listen(4)
+
+    def loop():
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            c.close()
+    threading.Thread(target=loop, daemon=True).start()
+    return srv
+
+
+def test_helper_mgmt_eof_during_banner_does_not_hang(helper, tmp_path, monkeypatch):
+    import tempfile
+    import threading
+    sock = Path(tempfile.mkdtemp(prefix="vp", dir="/tmp" if Path("/tmp").is_dir() else None)) / "m.sock"
+    srv = _closing_unix_server(sock)
+    monkeypatch.setattr(helper, "MGMT_SOCK", str(sock))
+    result = {}
+
+    def call():
+        try:
+            helper._mgmt("status 3", timeout=1.0)
+            result["r"] = "returned"
+        except OSError as e:
+            result["r"] = type(e).__name__
+
+    t = threading.Thread(target=call, daemon=True)
+    t.start()
+    t.join(5)
+    srv.close()
+    assert not t.is_alive(), "helper spins forever when the management socket closes before the banner"
+    assert result["r"] == "ConnectionError"
+
+
+def test_helper_nft_apply_cleans_temp_file_on_failure(helper, tmp_path, monkeypatch):
+    import io
+    monkeypatch.setattr(helper, "NFT_DIR", str(tmp_path), raising=False)
+    monkeypatch.setattr(helper, "NFT_FILE", str(tmp_path / "vpnpanel.nft"))
+    monkeypatch.setattr(helper.sys, "stdin", io.StringIO('{"no_internet": [], "children": [], "panel_admins": []}'))
+
+    def boom(cmd, **kw):
+        raise helper.HelperError("nft failed: syntax error")
+    monkeypatch.setattr(helper, "run", boom)
+    with pytest.raises(helper.HelperError):
+        helper.v_nft_apply()
+    assert list(tmp_path.iterdir()) == []
