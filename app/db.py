@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS policies (
     block_gambling      INTEGER NOT NULL DEFAULT 0,
     block_tracking      INTEGER NOT NULL DEFAULT 0,
     block_encrypted_dns INTEGER NOT NULL DEFAULT 0,
+    block_vpn_protocols INTEGER NOT NULL DEFAULT 0,
     safesearch          INTEGER NOT NULL DEFAULT 0,
     youtube_restricted  INTEGER NOT NULL DEFAULT 0,
     enforce_schedule    INTEGER NOT NULL DEFAULT 0,
@@ -251,6 +252,7 @@ def init():
     with _init_lock:
         conn = get()
         conn.executescript(SCHEMA)
+        _migrate(conn)
         for k, v in config.DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, v))
         if not conn.execute("SELECT 1 FROM policies LIMIT 1").fetchone():
@@ -262,6 +264,19 @@ def init():
                 vals = [1, rules, ts, ts] + list(p.values())
                 conn.execute(
                     f"INSERT INTO policies({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", vals)  # noqa: S608 - fixed column names/fragments only; values are bound parameters
+
+
+# Columns added after the first release: (table, column, definition). Additive only, safe to re-run.
+MIGRATIONS = [
+    ("policies", "block_vpn_protocols", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+
+def _migrate(conn):
+    for table, column, definition in MIGRATIONS:
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")  # noqa: S608 - fixed identifiers from MIGRATIONS
 
 
 def setting(key):

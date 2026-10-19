@@ -263,7 +263,7 @@ def desired_state(now=None):
     now = now or db.now_utc()
     ev = evaluate(now)
     ccd, clients, lists = {}, {}, {c: [] for c in CATEGORY_LISTS}
-    nft = {"no_internet": [], "children": [], "panel_admins": []}
+    nft = {"no_internet": [], "children": [], "panel_admins": [], "bypass_protected": [], "tunnel_blocked": []}
     rules = {"block": {}, "allow": {}}
     for e in ev:
         d, p, m = e["device"], e["policy"], e["member"]
@@ -276,6 +276,10 @@ def desired_state(now=None):
             nft["no_internet"].append(ip)
         if e["child"]:
             nft["children"].append(ip)
+        if p["block_encrypted_dns"]:
+            nft["bypass_protected"].append(ip)    # firewall side of "Prevent filter bypass"
+        if p["block_vpn_protocols"]:
+            nft["tunnel_blocked"].append(ip)      # opt-in: standard VPN/proxy protocol ports
         if e["active"] and m["type"] == "ADULT" and d["panel_access"]:
             nft["panel_admins"].append(ip)
         clients[d["common_name"]] = adguard_client_data(d, p, e["schedule"]["tz"], now)

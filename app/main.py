@@ -591,8 +591,8 @@ def policy_create(ctx: Ctx = AdminPost):
     if db.q1("SELECT 1 FROM policies WHERE name = ?", name):
         return redirect("/policies", ctx, "A policy with that name exists.", "error")
     cols = ["kind", "description", "block_malware", "block_adult", "block_gambling", "block_tracking",
-            "block_encrypted_dns", "safesearch", "youtube_restricted", "enforce_schedule", "custom_block",
-            "custom_allow"]
+            "block_encrypted_dns", "block_vpn_protocols", "safesearch", "youtube_restricted", "enforce_schedule",
+            "custom_block", "custom_allow"]
     ts = db.now_iso()
     cur = db.ex(f"INSERT INTO policies(name, builtin, service_rules, extra_services, created_at, updated_at, {','.join(cols)}) "  # noqa: S608 - fixed column names/fragments only; values are bound parameters
                 f"VALUES (?,0,?,?,?,?,{','.join('?' * len(cols))})", name, json.dumps(src["service_rules"]),
@@ -630,7 +630,8 @@ def policy_save(pid: int, ctx: Ctx = AdminPost):
     new = dict(name=name, kind=kind, description=ctx.f("description")[:300],
                block_malware=ctx.checked("block_malware"), block_adult=ctx.checked("block_adult"),
                block_gambling=ctx.checked("block_gambling"), block_tracking=ctx.checked("block_tracking"),
-               block_encrypted_dns=ctx.checked("block_encrypted_dns"), safesearch=ctx.checked("safesearch"),
+               block_encrypted_dns=ctx.checked("block_encrypted_dns"),
+               block_vpn_protocols=ctx.checked("block_vpn_protocols"), safesearch=ctx.checked("safesearch"),
                youtube_restricted=ctx.checked("youtube_restricted"), enforce_schedule=ctx.checked("enforce_schedule"),
                custom_block="\n".join(block_doms), custom_allow="\n".join(allow_doms))
     db.ex(f"UPDATE policies SET {', '.join(k + '=?' for k in new)}, service_rules=?, extra_services=?, updated_at=? "  # noqa: S608 - fixed column names/fragments only; values are bound parameters

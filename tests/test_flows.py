@@ -198,3 +198,68 @@ def test_back_redirect_only_follows_same_origin_referer(client, referer, expecte
         r = c.post(f"/schedules/{mid}/override/cancel", data={"csrf_token": token},
                     headers={"referer": referer} if referer else {}, follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == expected
+
+
+def _policy_id(name):
+    return db.q1("SELECT id FROM policies WHERE name = ?", name)["id"]
+
+
+def test_bypass_and_tunnel_sets_follow_policy_flags(client):
+    """Prevent-filter-bypass → bypass_protected; new opt-in flag → tunnel_blocked; others untouched."""
+    with TestClient(main.app, base_url="http://testserver") as c:
+        r = c.get("/login")
+        c.post("/login", data={"username": "tester", "password": PASSWORD, "login_csrf": login_csrf(r.text)})
+        tok = csrf(c.get("/").text)
+        ids = {}
+        for name, mtype in (("Fw Kid", "CHILD"), ("Fw Adult", "ADULT"), ("Fw Guest", "GUEST")):
+            if not db.q1("SELECT 1 FROM family_members WHERE name = ?", name):
+                c.post("/members", data={"csrf_token": tok, "name": name, "type": mtype})
+            mid = db.q1("SELECT id FROM family_members WHERE name = ?", name)["id"]
+            c.post("/devices", data={"csrf_token": tok, "member_id": mid, "display_name": f"{name} laptop"})
+            ids[mtype] = db.q1("SELECT vpn_ipv4 FROM devices WHERE family_member_id = ? ORDER BY id DESC", mid)[0]
+        pid = _policy_id("Child — standard")
+        form = {"csrf_token": tok, "name": "Child — standard", "kind": "CHILD", "block_malware": "on",
+                "block_adult": "on", "block_gambling": "on", "block_encrypted_dns": "on", "safesearch": "on",
+                "youtube_restricted": "on"}
+        c.post(f"/policies/{pid}", data=form)                  # Prevent filter bypass on, VPN flag off
+        nft = engine.desired_state()["nft"]
+        assert ids["CHILD"] in nft["bypass_protected"]
+        assert ids["ADULT"] not in nft["bypass_protected"] and ids["GUEST"] not in nft["bypass_protected"]
+        assert ids["CHILD"] not in nft["tunnel_blocked"]       # opt-in, default off
+        page = c.get(f"/policies/{pid}").text
+        assert 'name="block_vpn_protocols"' in page
+        form["block_vpn_protocols"] = "on"
+        c.post(f"/policies/{pid}", data=form)
+        nft = engine.desired_state()["nft"]
+        assert ids["CHILD"] in nft["tunnel_blocked"] and ids["ADULT"] not in nft["tunnel_blocked"]
+        audit_row = db.q1("SELECT details FROM audit_logs WHERE action = 'policy.changed' ORDER BY id DESC")
+        assert "block_vpn_protocols" in audit_row["details"]
+
+        c.post("/policies", data={"csrf_token": tok, "clone_from": pid, "name": "Fw clone"})
+        assert db.q1("SELECT block_vpn_protocols FROM policies WHERE name = 'Fw clone'")[0] == 1
+
+        form.pop("block_vpn_protocols")
+        form.pop("block_encrypted_dns")
+        c.post(f"/policies/{pid}", data=form)                  # turning the flags off removes the device again
+        nft = engine.desired_state()["nft"]
+        assert ids["CHILD"] not in nft["tunnel_blocked"] and ids["CHILD"] not in nft["bypass_protected"]
+        assert ids["CHILD"] in nft["children"]                   # pre-existing child rules unchanged
+        form["block_encrypted_dns"] = "on"
+        c.post(f"/policies/{pid}", data=form)
+
+
+def test_existing_database_gains_new_policy_column(tmp_path, monkeypatch):
+    import sqlite3
+    old = tmp_path / "old.db"
+    con = sqlite3.connect(old)
+    con.executescript(db.SCHEMA.replace("    block_vpn_protocols INTEGER NOT NULL DEFAULT 0,\n", ""))
+    con.execute("INSERT INTO policies(name, kind, created_at, updated_at) VALUES ('Legacy', 'CHILD', 'x', 'x')")
+    con.commit()
+    con.close()
+    monkeypatch.setattr(config, "DB_PATH", old)
+    monkeypatch.setattr(db._local, "conn", None)
+    db.init()
+    row = db.q1("SELECT block_vpn_protocols FROM policies WHERE name = 'Legacy'")
+    assert row[0] == 0
+    db.get().close()
+    monkeypatch.setattr(db._local, "conn", None)
