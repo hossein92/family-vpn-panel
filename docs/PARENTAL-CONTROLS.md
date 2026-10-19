@@ -65,8 +65,13 @@ automatically, can be cancelled, and are recorded in the audit log.
 ## Honest limitations
 
 * DNS filtering blocks domains, not individual pages or videos.
-* Apps that use hard-coded IPs, their own VPN, or DoH endpoints unknown to the lists can evade DNS
-  filtering. Bypass lists, DoT blocking and service blocking reduce this, they don't eliminate it.
+* Apps that use hard-coded IPs, their own VPN, or encrypted-DNS endpoints unknown to the lists can
+  evade DNS filtering. The bypass list, the resolver-address and port-853 firewall rules, the optional
+  VPN-protocol block and service blocking reduce this; they don't eliminate it. Tunnels that look like
+  ordinary HTTPS cannot be detected without TLS interception, which this project does not do.
+* On phones a second VPN app usually *replaces* the family VPN rather than running inside it — the
+  server cannot prevent that. Use the platform's controls: Android "Always-on VPN" + "Block
+  connections without VPN", or Screen Time / MDM restrictions on installing VPN profiles and apps.
 * Controls apply only while the device is connected to the VPN. Use the device's own settings
   (Screen Time, Family Link, always-on VPN / "Connect On Demand") to keep the VPN on.
 * SafeSearch / YouTube Restricted Mode depend on those services honouring the DNS-based mechanism.
