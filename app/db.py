@@ -276,7 +276,12 @@ def _migrate(conn):
     for table, column, definition in MIGRATIONS:
         have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in have:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")  # noqa: S608 - fixed identifiers from MIGRATIONS
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")  # noqa: S608 - fixed identifiers from MIGRATIONS
+            except sqlite3.OperationalError as e:
+                # Another process (panel / vpnpanel-admin) added it between our check and ALTER.
+                if "duplicate column" not in str(e).lower():
+                    raise
 
 
 def setting(key):

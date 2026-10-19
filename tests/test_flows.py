@@ -263,3 +263,30 @@ def test_existing_database_gains_new_policy_column(tmp_path, monkeypatch):
     assert row[0] == 0
     db.get().close()
     monkeypatch.setattr(db._local, "conn", None)
+
+
+def test_migration_tolerates_a_concurrent_process(tmp_path):
+    """Panel and vpnpanel-admin can start together: if another process adds the column between our
+    check and our ALTER, init must not crash."""
+    import sqlite3
+    path = tmp_path / "race.db"
+    real = sqlite3.connect(path)
+    real.executescript(db.SCHEMA.replace("    block_vpn_protocols INTEGER NOT NULL DEFAULT 0,\n", ""))
+
+    class StaleCheck:
+        """Reports the column as missing once, after another 'process' already added it."""
+        def __init__(self, conn):
+            self.conn, self.first = conn, True
+
+        def execute(self, sql, *a):
+            if sql.startswith("PRAGMA table_info") and self.first:
+                self.first = False
+                sqlite3.connect(path).execute("ALTER TABLE policies ADD COLUMN block_vpn_protocols "
+                                              "INTEGER NOT NULL DEFAULT 0")
+                return iter([])
+            return self.conn.execute(sql, *a)
+
+    db._migrate(StaleCheck(real))
+    cols = {r[1] for r in real.execute("PRAGMA table_info(policies)")}
+    assert "block_vpn_protocols" in cols
+    real.close()
