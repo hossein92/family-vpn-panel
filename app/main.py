@@ -5,7 +5,7 @@ import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -75,9 +75,13 @@ def _int(v, default=None):
 
 
 def back(ctx, fallback="/"):
-    ref = ctx.request.headers.get("referer", "")
+    """Return to the referring page, but only to a local path on this same host."""
+    ref = urlsplit(ctx.request.headers.get("referer", ""))
     host = ctx.request.headers.get("host", "")
-    return ref if host and f"//{host}/" in ref else fallback
+    if not host or ref.scheme not in ("http", "https") or ref.netloc != host:
+        return fallback
+    path = ref.path + (f"?{ref.query}" if ref.query else "")
+    return path if safe_next(path) == path else fallback
 
 
 _NEXT_RE = re.compile(r"^/(?![/\\])[A-Za-z0-9._~!$&'()*+,;=:@/?%-]*$")

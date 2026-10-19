@@ -178,3 +178,23 @@ def test_login_redirect_rejects_non_local_targets(client, nxt):
 def test_login_page_escapes_next(client):
     r = client.get("/login", params={"next": '"><script>alert(1)</script>'})
     assert "<script>alert(1)" not in r.text
+
+
+@pytest.mark.parametrize("referer,expected", [
+    ("http://testserver/devices?show=all", "/devices?show=all"),
+    ("https://evil.example/?x=//testserver/", "/schedules"),
+    ("https://evil.example//testserver/devices", "/schedules"),
+    ("http://testserver.evil.example/devices", "/schedules"),
+    ("", "/schedules"),
+])
+def test_back_redirect_only_follows_same_origin_referer(client, referer, expected):
+    with TestClient(main.app, base_url="http://testserver") as c:
+        r = c.get("/login")
+        c.post("/login", data={"username": "tester", "password": PASSWORD, "login_csrf": login_csrf(r.text)})
+        token = csrf(c.get("/").text)
+        if not db.q1("SELECT 1 FROM family_members WHERE name = 'Ref Test'"):
+            c.post("/members", data={"csrf_token": token, "name": "Ref Test", "type": "ADULT"})
+        mid = db.q1("SELECT id FROM family_members WHERE name = 'Ref Test'")["id"]
+        r = c.post(f"/schedules/{mid}/override/cancel", data={"csrf_token": token},
+                    headers={"referer": referer} if referer else {}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == expected
