@@ -72,6 +72,7 @@ DNS_RESOLVERS = (
     "185.222.222.222", "45.11.45.11",
 )
 EXTRA_RESOLVERS = []
+EXTRA_RESOLVERS_ERROR = None
 
 
 def configure(values):
@@ -103,15 +104,20 @@ def configure(values):
         int(CFG[name])
     if not re.match(r"^[A-Za-z0-9.:-]{1,253}$", CFG["VPN_PUBLIC_HOST"]):
         raise ValueError("invalid VPN_PUBLIC_HOST")
-    global EXTRA_RESOLVERS
-    EXTRA_RESOLVERS = []
-    for item in filter(None, (x.strip() for x in CFG.get("EXTRA_BLOCKED_RESOLVERS", "").split(","))):
-        net = ipaddress.ip_network(item, strict=True)  # ValueError for nonsense
-        if net.version != 4 or not net.is_global or net.prefixlen < 16:
-            raise ValueError("EXTRA_BLOCKED_RESOLVERS: only public IPv4 addresses or networks of /16 or smaller")
-        EXTRA_RESOLVERS.append(str(net))
-    if len(EXTRA_RESOLVERS) > 256:
-        raise ValueError("EXTRA_BLOCKED_RESOLVERS: at most 256 entries")
+    # Optional setting: an invalid value must not disable unrelated verbs (revoke, CCD, status).
+    # It is recorded and only nft-apply refuses, leaving the live firewall table unchanged.
+    global EXTRA_RESOLVERS, EXTRA_RESOLVERS_ERROR
+    EXTRA_RESOLVERS, EXTRA_RESOLVERS_ERROR = [], None
+    try:
+        for item in filter(None, (x.strip() for x in CFG.get("EXTRA_BLOCKED_RESOLVERS", "").split(","))):
+            net = ipaddress.ip_network(item, strict=True)
+            if net.version != 4 or not net.is_global or net.prefixlen < 16:
+                raise ValueError(f"{item}: only public IPv4 addresses or networks of /16 or smaller")
+            EXTRA_RESOLVERS.append(str(net))
+        if len(EXTRA_RESOLVERS) > 256:
+            raise ValueError("at most 256 entries")
+    except ValueError as e:
+        EXTRA_RESOLVERS, EXTRA_RESOLVERS_ERROR = [], str(e)[:200]
 
 
 configure(read_env_file(ENV_FILE))
@@ -428,8 +434,11 @@ def _mgmt_kill_cn(cn):
     n = 0
     for c in st["clients"]:
         if c["cn"] == cn:
-            _mgmt(f"client-kill {c['client_id']} HALT")
-            n += 1
+            try:
+                _mgmt(f"client-kill {c['client_id']} HALT")
+                n += 1
+            except OSError:  # management socket went away; the CRL/CCD change is already in place
+                continue
     return n
 
 
@@ -517,6 +526,9 @@ def render_nft(data):
     versions) render empty, so the previous rules stay exactly as they were."""
     if not isinstance(data, dict):
         raise HelperError("nft state must be a JSON object")
+    if EXTRA_RESOLVERS_ERROR:
+        raise HelperError(f"invalid EXTRA_BLOCKED_RESOLVERS in panel.env ({EXTRA_RESOLVERS_ERROR}); "
+                          "firewall left unchanged")
     sets = {name: _elements(data.get(name, [])) for name in NFT_SETS}
     resolvers = sorted({*DNS_RESOLVERS, *EXTRA_RESOLVERS}, key=lambda n: ipaddress.ip_network(n))
     return NFT_TEMPLATE.format(

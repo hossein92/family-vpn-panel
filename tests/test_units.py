@@ -322,11 +322,13 @@ def test_nft_extra_resolvers_from_config(helper):
         text = helper.render_nft(EMPTY_STATE)
         assert "45.90.28.0/24" in text and "45.90.30.53" in text
         for bad_doc in ("198.51.100.53",):  # documentation ranges are not public
-            with pytest.raises(ValueError):
-                helper.configure({"EXTRA_BLOCKED_RESOLVERS": bad_doc})
+            helper.configure({"EXTRA_BLOCKED_RESOLVERS": bad_doc})
+            with pytest.raises(helper.HelperError):
+                helper.render_nft(EMPTY_STATE)
         for bad in ("10.0.0.0/8", "0.0.0.0/0", "fd00::1", "nonsense", "100.64.0.1"):
-            with pytest.raises(ValueError):
-                helper.configure({"EXTRA_BLOCKED_RESOLVERS": bad})
+            helper.configure({"EXTRA_BLOCKED_RESOLVERS": bad})
+            with pytest.raises(helper.HelperError):
+                helper.render_nft(EMPTY_STATE)
     finally:
         helper.configure({"VPN_PUBLIC_HOST": "203.0.113.10", "VPN_IPV6_SUBNET": "fd00:db8:1:1::/64"})
 
@@ -369,3 +371,30 @@ def test_restore_procedure_discards_stale_wal_before_installing_database():
     rm = next(i for i, ln in enumerate(lines) if "vpnpanel.db-wal" in ln and "vpnpanel.db-shm" in ln and "rm -f" in ln)
     inst = next(i for i, ln in enumerate(lines) if ln.startswith("install") and "vpnpanel.db" in ln)
     assert stop < rm < inst
+
+
+# ---------------------------------------------------------------- final-review regressions
+
+def test_invalid_extra_resolvers_only_block_the_firewall_apply(helper):
+    """A typo in the optional EXTRA_BLOCKED_RESOLVERS must not disable revoke/CCD/status: only
+    nft-apply refuses (the live table stays as it is)."""
+    try:
+        helper.configure({"VPN_PUBLIC_HOST": "203.0.113.10", "VPN_IPV6_SUBNET": "fd00:db8:1:1::/64",
+                          "EXTRA_BLOCKED_RESOLVERS": "10.0.0.0/8"})          # must not raise
+        assert helper.check_cn("alex-phone") == "alex-phone"                 # other verbs keep working
+        with pytest.raises(helper.HelperError, match="EXTRA_BLOCKED_RESOLVERS"):
+            helper.render_nft(EMPTY_STATE)
+    finally:
+        helper.configure({"VPN_PUBLIC_HOST": "203.0.113.10", "VPN_IPV6_SUBNET": "fd00:db8:1:1::/64"})
+    helper.render_nft(EMPTY_STATE)
+
+
+def test_revoke_session_kill_tolerates_management_socket_failure(helper, monkeypatch):
+    """The CRL is already updated when sessions are killed; a dropped management socket at that
+    point must not turn a completed revocation into an error (DB and PKI would disagree)."""
+    monkeypatch.setattr(helper, "v_mgmt_status", lambda: {"clients": [{"cn": "alex-phone", "client_id": 7}]})
+
+    def broken(cmd, timeout=5.0):
+        raise ConnectionError("management interface closed the connection")
+    monkeypatch.setattr(helper, "_mgmt", broken)
+    assert helper._mgmt_kill_cn("alex-phone") == 0
