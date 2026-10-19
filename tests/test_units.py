@@ -357,3 +357,15 @@ def test_scripts_do_not_use_fixed_paths_in_tmp():
             if ln.lstrip().startswith("#"):
                 continue
             assert not re.search(r"/tmp/[A-Za-z0-9_.-]+", ln), f"{script}: {ln.strip()}"
+
+
+def test_restore_procedure_discards_stale_wal_before_installing_database():
+    """Leftover -wal/-shm of the old database are replayed onto the restored file (verified in the
+    lab: rows written after the backup reappeared). The documented restore must remove them first."""
+    doc = (ROOT / "docs" / "OPERATIONS.md").read_text()
+    block = doc.split("## Restore", 1)[1].split("```bash", 1)[1].split("```", 1)[0]
+    lines = [ln.strip() for ln in block.splitlines()]
+    stop = next(i for i, ln in enumerate(lines) if ln.startswith("systemctl stop") and "vpnpanel" in ln)
+    rm = next(i for i, ln in enumerate(lines) if "vpnpanel.db-wal" in ln and "vpnpanel.db-shm" in ln and "rm -f" in ln)
+    inst = next(i for i, ln in enumerate(lines) if ln.startswith("install") and "vpnpanel.db" in ln)
+    assert stop < rm < inst

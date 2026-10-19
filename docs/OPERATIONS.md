@@ -52,7 +52,9 @@ table and duplicates the MASQUERADE rule each time (harmless but untidy; a reboo
 sudo vpnpanel-backup
 ```
 
-Each `vpn-backup-<UTC>.tgz` (mode 0600, with a `.sha256` file) contains:
+The panel database is read **as the `vpnpanel` user** (online SQLite snapshot with an integrity
+check) and streamed to root through a pipe, so the root job never opens a path inside the
+panel-owned `/var/lib/vpnpanel`. Each `vpn-backup-<UTC>.tgz` (mode 0600, with a `.sha256` file) contains:
 
 * `etc.tgz` — `/etc/openvpn` (**including the PKI and CA private key**), `/etc/vpnpanel`, UFW and
   sysctl configuration, nginx site, systemd units, sudoers rule, AdGuard Home config, helper scripts;
@@ -67,13 +69,18 @@ sudo tar -C /var/backups -c family-vpn-panel | gpg --symmetric --cipher-algo AES
 
 ## Restore
 
-On the same or a freshly installed server (run the installer first on a new machine):
+On the same or a freshly installed server (run the installer first on a new machine). Restore the
+database **and** `etc.tgz` from the same archive: the database and the PKI must describe the same
+certificates.
 
 ```bash
 sudo -i
 mkdir /root/restore && tar -xzf /var/backups/family-vpn-panel/vpn-backup-<TS>.tgz -C /root/restore
+(cd /var/backups/family-vpn-panel && sha256sum -c vpn-backup-<TS>.tgz.sha256)
 systemctl stop vpnpanel nginx adguardhome
 tar -xzf /root/restore/etc.tgz -C /
+# The old database's write-ahead log must not be replayed onto the restored file.
+rm -f /var/lib/vpnpanel/vpnpanel.db-wal /var/lib/vpnpanel/vpnpanel.db-shm
 install -o vpnpanel -g vpnpanel -m 600 /root/restore/vpnpanel.db /var/lib/vpnpanel/vpnpanel.db
 systemctl daemon-reload
 systemctl restart openvpn-server@server vpnpanel-nft adguardhome vpnpanel nginx
@@ -82,6 +89,9 @@ vpnpanel-admin apply
 
 Then check *Server health* and connect one device. Existing client profiles keep working because the
 CA, server certificate and tls-crypt key are restored unchanged.
+
+Never delete `vpnpanel.db-wal` / `-shm` next to a database you want to keep: they hold committed
+data until SQLite checkpoints it. Remove them only when replacing the database file, as above.
 
 To roll back only an OpenVPN configuration change, restore `server.conf` from the archive and
 `systemctl restart openvpn-server@server`.

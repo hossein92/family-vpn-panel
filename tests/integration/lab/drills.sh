@@ -48,9 +48,13 @@ counts() { q "SELECT (SELECT COUNT(*) FROM family_members)||'/'||(SELECT COUNT(*
 orig=$(counts)
 q "INSERT INTO family_members(name, type, policy_id, created_at) VALUES ('Drill temp', 'ADULT', 1, 'x')"
 chk "change made after the backup is visible" "[ \"\$(q \"SELECT COUNT(*) FROM family_members WHERE name='Drill temp'\")\" = 1 ]"
+curl -sk -o /dev/null https://127.0.0.1:8443/login   # panel connection active → stale WAL left on stop
 systemctl stop vpnpanel
+chk "panel left a write-ahead log behind (the case the docs must handle)" "[ -s $DB-wal ]"
+# Documented order (docs/OPERATIONS.md): stop → discard old -wal/-shm → install restored file.
 T=$(mktemp -d); tar -xzf "$A" -C "$T" vpnpanel.db
-install -o vpnpanel -g vpnpanel -m 600 "$T/vpnpanel.db" "$DB"; rm -f "$DB-wal" "$DB-shm"; rm -rf "$T"
+rm -f "$DB-wal" "$DB-shm"
+install -o vpnpanel -g vpnpanel -m 600 "$T/vpnpanel.db" "$DB"; rm -rf "$T"
 systemctl start vpnpanel
 chk "panel serves after restore" panel_up
 chk "restored counts match the backup ($orig)" "[ \"\$(counts)\" = '$orig' ]" "$(counts)"
