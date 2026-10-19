@@ -366,10 +366,10 @@ def main():
         check("restriction applies after reconnect", not tcp_open("ec", TUNNEL_HOST, 1194))
 
         # failure handling: an invalid state is refused and the live table is left untouched
-        live_before = sh("nft list table inet vpnpanel")
+        live_before = sh("nft -s list table inet vpnpanel")  # -s: without counters
         bad = sh("echo '{\"tunnel_blocked\": [\"192.0.2.1\"]}' | sudo -u vpnpanel sudo -n /usr/local/sbin/vpnpanel-helper nft-apply")
         check("helper refuses an invalid firewall state", '"ok": false' in bad, bad[:80])
-        check("live firewall unchanged after a refused apply", sh("nft list table inet vpnpanel") == live_before)
+        check("live firewall unchanged after a refused apply", sh("nft -s list table inet vpnpanel") == live_before)
         check("no temporary ruleset files left behind", not sh("ls -A /etc/vpnpanel | grep '^.nft-'"))
 
         # reversibility: flag off → back to the previous behaviour

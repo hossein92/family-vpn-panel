@@ -24,6 +24,9 @@ A finding is marked **resolved** only when a test that failed before the fix pas
 | F-07 | Low | Hardening · resolved | The root helper passes its inherited environment to Easy-RSA, OpenSSL, nft and systemctl. | `helper/vpnpanel-helper` (`run`) | `f666d5e` |
 | F-08 | Info | Not exploitable · hardened | The post-login `next` check relied on Starlette's Location encoding. | `app/main.py` | `8715ac6` |
 | F-09 | Info | Not reachable from browsers · hardened | `back()` accepted any `Referer` that contained `//<host>/`. | `app/main.py` | `fee92fe` |
+| R-01 | **Medium** (availability of revocation) | Found in final review · resolved | An invalid optional `EXTRA_BLOCKED_RESOLVERS` value made the helper fail at startup, which disabled every verb including `revoke`. | `helper/vpnpanel-helper` | `b9cdabf` |
+| R-02 | Low | Found in final review · resolved | A management-socket failure while killing sessions after the CRL update turned a completed revocation into an error, leaving the database and the PKI inconsistent until a retry. | `helper/vpnpanel-helper` | `b9cdabf` |
+| R-03 | Low | Found in final review · resolved | Two processes starting together (panel and `vpnpanel-admin`) could race on the additive migration; the second crashed with "duplicate column". | `app/db.py` | `943c27b` |
 
 ### F-01 — Root helper spins forever on a closed management socket
 
@@ -109,6 +112,21 @@ The sudoers draft was written to `/tmp/vpnpanel.sudoers`, checked with `visudo`,
 - **Fix:** subprocesses now get a fixed allow-list environment.
 - **Test:** `test_helper_subprocesses_get_a_fixed_minimal_environment`.
 - **Lab:** issuing, revoking, regenerating the CRL and applying the firewall all work with the minimal environment.
+
+### R-01 to R-03 — Final independent review
+
+A fresh review of the complete diff, after merging the latest `main`, found three more issues. None was Critical or High.
+
+- **R-01 (Medium):** the new optional setting was validated while the helper module loaded, so a typo made *every* verb fail, revocation included.
+  - **Fix:** the value is recorded at load time. Only `nft-apply` refuses, with a clear error, and the live table stays as it is.
+  - **Unit test:** `test_invalid_extra_resolvers_only_block_the_firewall_apply`.
+  - **Lab drill:** with an invalid value, `ccd-list` and `health` still work; `nft-apply` refuses and the table is byte-identical; after the value is corrected, apply works again.
+- **R-02 (Low):** session kills that run after the CRL update now tolerate socket errors.
+  - **Test:** `test_revoke_session_kill_tolerates_management_socket_failure`.
+- **R-03 (Low):** the migration ignores a "duplicate column" error caused by a concurrent process.
+  - **Test:** `test_migration_tolerates_a_concurrent_process`.
+
+The review also made the integration checks compare the live table without packet counters (`nft -s`), so a busy table can't cause false results.
 
 ### F-08 / F-09 — Redirect handling (not exploitable)
 
@@ -224,15 +242,16 @@ The sudoers draft was written to `/tmp/vpnpanel.sudoers`, checked with `visudo`,
 
 | Suite | Command | Result |
 |---|---|---|
-| Unit | `python -m pytest -q tests/test_units.py` | 33 passed |
-| HTTP flows (fake backend, network-guarded) | `python -m pytest -q tests/test_flows.py` | 30 passed |
-| Lint | `ruff check . && ruff check helper/vpnpanel-helper` | clean |
+| Unit | `python -m pytest -q tests/test_units.py` | 35 passed |
+| HTTP flows (fake backend, network-guarded) | `python -m pytest -q tests/test_flows.py` | 31 passed |
+| Lint | `ruff check . && ruff check helper/vpnpanel-helper` (ruff 0.16.10) | clean |
+| Python 3.12 (CI version) | full pytest + ruff in a `python:3.12-slim` container | 66 passed, clean |
 | Shell | `shellcheck -S warning deploy/*.sh deploy/vpnpanel-backup deploy/vpnpanel-admin tools/vpn-nstest tests/integration/lab/*.sh` | clean |
 | Secret scan | `gitleaks git` (16 commits), `trufflehog git --since-commit 1985b66` | no findings |
 | Lab integration | `tests/integration/lab/run-lab.sh e2e` | **79/79** |
-| Lab drills | `tests/integration/lab/run-lab.sh drills` | **27/27** |
+| Lab drills | `tests/integration/lab/run-lab.sh drills` | **32/32** |
 
-Each regression test listed under F-01 to F-09 was run against the previous code and failed before it was committed with its fix.
+Each regression test listed under F-01 to F-09 and R-01 to R-03 was run against the previous code and failed before it was committed with its fix.
 
 **Lab environment:**
 - Ubuntu 24.04 in privileged systemd containers on Docker Desktop (arm64);
@@ -242,6 +261,8 @@ Each regression test listed under F-01 to F-09 was run against the previous code
 - all resources named `fvpsec-*`, created and removed by the script.
 
 One e2e run failed 11 checks because the host machine slept for 42 minutes in the middle of the run. The panel then enforced its 30-minute idle timeout, which was correct behaviour. A rerun passed 79/79, and the CRL check now counts from the reconnect attempt instead of "the last minute" (`58df074`).
+
+During the final review, one lab rebuild stopped while downloading AdGuard Home because of a transient network timeout. The drills that ran against that half-installed server failed and were discarded. A full rebuild then passed e2e 79/79 and drills 32/32.
 
 **Not validated here (needs manual checks):**
 - client behaviour on real iOS, Android, Windows and macOS devices (IPv6, DNS, behaviour while disconnected);

@@ -70,6 +70,22 @@ sleep 5
 chk "nft table present after restarts" "nft list table inet vpnpanel >/dev/null"
 chk "panel serves after restarts" panel_up
 
+echo "== an invalid optional setting only blocks the firewall apply"
+cp -p /etc/vpnpanel/panel.env /root/panel.env.bak
+echo "EXTRA_BLOCKED_RESOLVERS=10.0.0.0/8" >> /etc/vpnpanel/panel.env
+nft -s list table inet vpnpanel > /root/nft.before
+H="sudo -u vpnpanel sudo -n /usr/local/sbin/vpnpanel-helper"
+$H ccd-list > /root/ccd.out 2>&1
+chk "ccd-list still works with an invalid EXTRA_BLOCKED_RESOLVERS" "grep -q '\"ok\": true' /root/ccd.out"
+$H health > /root/health.out 2>&1
+chk "health still works with an invalid EXTRA_BLOCKED_RESOLVERS" "grep -q '\"ok\": true' /root/health.out"
+echo '{"children":[]}' | $H nft-apply > /root/nft.out 2>&1
+chk "nft-apply refuses with a clear error" "grep -q 'EXTRA_BLOCKED_RESOLVERS' /root/nft.out"
+nft -s list table inet vpnpanel > /root/nft.after
+chk "live firewall table unchanged" "cmp -s /root/nft.before /root/nft.after"
+cp -p /root/panel.env.bak /etc/vpnpanel/panel.env
+chk "valid configuration applies again" "vpnpanel-admin apply >/dev/null"
+
 echo "== rollback compatibility with the previous release (1985b66)"
 if [ -f /root/old/helper ]; then
   cp -p /usr/local/sbin/vpnpanel-helper /root/helper.new
