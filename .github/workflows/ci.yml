@@ -26,7 +26,7 @@ jobs:
           ruff check .
           ruff check helper/vpnpanel-helper
       - name: Shell scripts (shellcheck)
-        run: shellcheck -S warning deploy/install.sh deploy/make-panel-tls.sh deploy/vpnpanel-backup deploy/vpnpanel-admin tools/vpn-nstest
+        run: shellcheck -S warning deploy/install.sh deploy/make-panel-tls.sh deploy/vpnpanel-backup deploy/vpnpanel-admin tools/vpn-nstest tests/integration/lab/*.sh
       - name: Tests (fake backend, network-guarded)
         run: python -m pytest -q
 

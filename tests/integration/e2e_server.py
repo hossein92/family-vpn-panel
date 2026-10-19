@@ -47,6 +47,10 @@ EGRESS = os.environ.get("EXPECTED_EGRESS_IP", "")
 EGRESS_URL = os.environ.get("EGRESS_CHECK_URL", "https://api.ipify.org")   # must return the caller's IP
 WEB_URL = os.environ.get("WEB_CHECK_URL", "https://www.wikipedia.org")      # any reachable site
 DOT_HOST = os.environ.get("DOT_TEST_HOST", "1.1.1.1")                       # host with TCP 853 open
+# A well-known public resolver address that accepts TCP 443 (blocked for "Prevent filter bypass").
+RESOLVER_IP = os.environ.get("RESOLVER_TEST_IP", "1.1.1.1")
+# Host with TCP 1194 open and a UDP echo on 51820 (e.g. the lab's stand-in). Unset → those checks SKIP.
+TUNNEL_HOST = os.environ.get("TUNNEL_TEST_HOST", "")
 WORK = "/root/vpnpanel-e2e"
 BASE = f"https://127.0.0.1:{ADMIN_PORT}"
 CTX = ssl.create_default_context(cafile="/etc/vpnpanel/panel-ca.crt")
@@ -58,6 +62,30 @@ results = []
 def check(name, ok, detail=""):
     results.append((name, bool(ok)))
     print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f"  — {detail}" if detail else ""), flush=True)
+
+
+def skip(name, why):
+    print(f"SKIP  {name}  — {why}", flush=True)
+
+
+def tcp_open(n, host, port):
+    out = sh(f"/usr/local/sbin/vpn-nstest exec {n} timeout 5 bash -c 'echo > /dev/tcp/{host}/{port}' && echo open || echo closed")
+    return out.endswith("open")
+
+
+def udp_echo(n, host, port):
+    code = ("import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(3); "
+            f"s.sendto(b'ping',('{host}',{port}));\ntry: print(s.recv(64).decode())\nexcept OSError: print('none')")
+    return ns(n, f"python3 -c \"{code}\"") == "ping"
+
+
+def nft_set(name):
+    data = json.loads(sh("sudo -u vpnpanel sudo -n /usr/local/sbin/vpnpanel-helper nft-counters"))["json"]
+    for item in data.get("nftables", []):
+        st = item.get("set")
+        if st and st.get("name") == name:
+            return sorted(e if isinstance(e, str) else json.dumps(e) for e in st.get("elem", []))
+    return []
 
 
 def get(path):
@@ -117,7 +145,8 @@ def cleanup():
       DELETE FROM connection_sessions WHERE device_id IN (SELECT d.id FROM devices d JOIN family_members m ON m.id=d.family_member_id WHERE m.name LIKE 'E2E %');
       UPDATE vpn_certificates SET device_id = NULL WHERE device_id IN (SELECT d.id FROM devices d JOIN family_members m ON m.id=d.family_member_id WHERE m.name LIKE 'E2E %');
       DELETE FROM devices WHERE family_member_id IN (SELECT id FROM family_members WHERE name LIKE 'E2E %');
-      DELETE FROM family_members WHERE name LIKE 'E2E %';" """)
+      DELETE FROM family_members WHERE name LIKE 'E2E %';
+      DELETE FROM policies WHERE name LIKE 'E2E %' AND builtin = 0;" """)
     sh(f"rm -f {WORK}/e2e-*.ovpn")
     print("cleanup done")
 
@@ -164,6 +193,8 @@ def main():
     a_id, a_cn, a_prof = device(adult_m, "Laptop", panel=True)
     c_id, c_cn, c_prof = device(child_m, "Tablet")
     c2_id, c2_cn, c2_prof = device(child_m, "Phone")
+    guest_m = member("E2E Guest", "GUEST")
+    g_id, g_cn, g_prof = device(guest_m, "Visitor")
     check("unique CNs per device", len({a_cn, c_cn, c2_cn}) == 3, f"{a_cn}, {c_cn}, {c2_cn}")
     check(f"profiles embed remote {PUBLIC_HOST} {PUBLIC_PORT}",
           all(f"remote {PUBLIC_HOST} {PUBLIC_PORT}" in open(p).read()
@@ -172,7 +203,7 @@ def main():
           not sh(f"ls /etc/openvpn/easy-rsa/pki/private /etc/openvpn/easy-rsa/pki/inline | grep -E '{a_cn}|{c_cn}|{c2_cn}'"))
 
     # ---- connect all three simultaneously
-    for n, p in (("ea", a_prof), ("ec", c_prof), ("ed", c2_prof)):
+    for n, p in (("ea", a_prof), ("ec", c_prof), ("ed", c2_prof), ("eg", g_prof)):
         sh(f"/usr/local/sbin/vpn-nstest down {n}")
         out = sh(f"/usr/local/sbin/vpn-nstest up {n} {p}", timeout=120)
         check(f"client {n} connects", "connected" in out and "NOT" not in out, out.splitlines()[-1] if out else "")
@@ -181,8 +212,8 @@ def main():
     check("three devices connected simultaneously",
           all(cn in html for cn in (a_cn, c_cn, c2_cn)) and "3 connected" in html.replace("&nbsp; ", "").replace("\n", " ")
           or all(cn in html for cn in (a_cn, c_cn, c2_cn)))
-    ips = {n: ns(n, "ip -4 -o addr show dev tun0").split()[3] for n in ("ea", "ec", "ed")}
-    check("distinct static VPN IPs", len(set(ips.values())) == 3, json.dumps(ips))
+    ips = {n: ns(n, "ip -4 -o addr show dev tun0").split()[3] for n in ("ea", "ec", "ed", "eg")}
+    check("distinct static VPN IPs", len(set(ips.values())) == 4, json.dumps(ips))
     for n in ("ea", "ec"):
         exit_ip = ns(n, f"curl -4 -s -m 10 {EGRESS_URL}")
         check(f"{n} egress through the VPN server", exit_ip == EGRESS if EGRESS else bool(exit_ip), exit_ip)
@@ -269,6 +300,86 @@ def main():
     v6 = ns("ec", "ping -6 -c1 -W2 2606:4700:4700::1111 2>&1")
     check("IPv6 captured in tunnel and refused", "unreachable" in v6.lower() or "No route" in v6, v6.splitlines()[-1] if v6 else "")
 
+    v6dns = ns("ec", "dig +short +time=3 +tries=1 @2606:4700:4700::1111 example.com 2>&1")
+    check("DNS to an IPv6 resolver does not leave the tunnel", "timed out" in v6dns or "unreachable" in v6dns.lower()
+          or "no servers could be reached" in v6dns, v6dns.splitlines()[-1] if v6dns else "")
+
+    # ---- policy isolation: Guest
+    gw = ns("eg", f"curl -4 -s -m 8 -o /dev/null -w '%{{http_code}}' {WEB_URL}")
+    check("guest device has internet", gw in ("200", "301", "302"), gw)
+    gp = ns("eg", f"curl -sk -m 6 -o /dev/null -w '%{{http_code}}' https://{SERVER}:{ADMIN_PORT}/login") or "000"
+    check("guest cannot reach the admin panel", gp == "000", gp)
+    peer = ns("eg", f"ping -c1 -W2 {ips['ea'].split('/')[0]} >/dev/null 2>&1 && echo reach || echo blocked")
+    check("guest cannot reach other VPN clients", peer == "blocked", peer)
+
+    # ---- "Prevent filter bypass" (firewall side): child (strict policy has it) vs adult vs guest
+    c_ip, a_ip, g_ip = (ips[n].split("/")[0] for n in ("ec", "ea", "eg"))
+    check("child is in the bypass_protected set; adult/guest are not",
+          c_ip in nft_set("bypass_protected") and a_ip not in nft_set("bypass_protected")
+          and g_ip not in nft_set("bypass_protected"), str(nft_set("bypass_protected")))
+    check(f"encrypted DNS to public resolver {RESOLVER_IP}:443 blocked for child", not tcp_open("ec", RESOLVER_IP, 443))
+    check(f"public resolver {RESOLVER_IP}:443 reachable for adult", tcp_open("ea", RESOLVER_IP, 443))
+    check(f"public resolver {RESOLVER_IP}:443 reachable for guest", tcp_open("eg", RESOLVER_IP, 443))
+    plain = ns("ec", f"dig +short +time=3 +tries=1 @{RESOLVER_IP} pornhub.com").splitlines()
+    check(f"plain DNS to {RESOLVER_IP} still answered by the filter for child", blocked(plain), str(plain))
+    web_c = ns("ec", f"curl -4 -s -m 8 -o /dev/null -w '%{{http_code}}' {WEB_URL}")
+    check("child keeps ordinary web access", web_c in ("200", "301", "302"), web_c)
+
+    # ---- opt-in "Block VPN and proxy protocols" on a dedicated test policy
+    if not TUNNEL_HOST:
+        skip("VPN/proxy protocol blocking", "set TUNNEL_TEST_HOST to a host with TCP 1194 + UDP echo 51820")
+    else:
+        before = (tcp_open("ec", TUNNEL_HOST, 1194), udp_echo("ec", TUNNEL_HOST, 51820))
+        check("VPN protocols allowed before the flag is enabled", before == (True, True), str(before))
+        post("/policies", {"csrf_token": t, "clone_from": strict_id, "name": "E2E Tunnel policy"})
+        pols, _ = get("/policies")
+        tp_id = int(re.search(r'href="/policies/(\d+)">E2E Tunnel policy', pols).group(1))
+        base = {"csrf_token": t, "name": "E2E Tunnel policy", "kind": "CHILD", "block_malware": "on",
+                "block_adult": "on", "block_gambling": "on", "block_encrypted_dns": "on"}
+        post(f"/policies/{tp_id}", dict(base, block_vpn_protocols="on"))
+        post(f"/members/{child_m}", {"name": "E2E Child", "type": "CHILD", "policy_id": tp_id, "notes": "", "csrf_token": t})
+        time.sleep(3)
+        check("child joins tunnel_blocked; adult does not",
+              c_ip in nft_set("tunnel_blocked") and a_ip not in nft_set("tunnel_blocked"), str(nft_set("tunnel_blocked")))
+        check("OpenVPN TCP 1194 blocked for child with the flag", not tcp_open("ec", TUNNEL_HOST, 1194))
+        check("WireGuard UDP 51820 blocked for child with the flag", not udp_echo("ec", TUNNEL_HOST, 51820))
+        check("adult unaffected by the VPN-protocol flag",
+              tcp_open("ea", TUNNEL_HOST, 1194) and udp_echo("ea", TUNNEL_HOST, 51820))
+        web_c = ns("ec", f"curl -4 -s -m 8 -o /dev/null -w '%{{http_code}}' {WEB_URL}")
+        check("child keeps ordinary web access with the flag", web_c in ("200", "301", "302"), web_c)
+
+        # restarts must not drop the restriction
+        sh("systemctl restart vpnpanel-nft")
+        time.sleep(2)
+        check("restriction survives vpnpanel-nft restart", not tcp_open("ec", TUNNEL_HOST, 1194))
+        sh("systemctl restart vpnpanel")
+        time.sleep(8)
+        check("restriction survives panel restart (forced re-apply)", not tcp_open("ec", TUNNEL_HOST, 1194))
+        sh("systemctl restart openvpn-server@server")
+        t0 = time.time()
+        while time.time() - t0 < 90 and not ns("ec", "ip -4 -o addr show dev tun0"):
+            time.sleep(3)
+        time.sleep(5)
+        back_ip = ns("ec", "ip -4 -o addr show dev tun0").split()
+        check("child reconnects after OpenVPN restart with the same static IP",
+              len(back_ip) > 3 and back_ip[3].split("/")[0] == c_ip, " ".join(back_ip[3:4]))
+        check("restriction applies after reconnect", not tcp_open("ec", TUNNEL_HOST, 1194))
+
+        # failure handling: an invalid state is refused and the live table is left untouched
+        live_before = sh("nft list table inet vpnpanel")
+        bad = sh("echo '{\"tunnel_blocked\": [\"192.0.2.1\"]}' | sudo -u vpnpanel sudo -n /usr/local/sbin/vpnpanel-helper nft-apply")
+        check("helper refuses an invalid firewall state", '"ok": false' in bad, bad[:80])
+        check("live firewall unchanged after a refused apply", sh("nft list table inet vpnpanel") == live_before)
+        check("no temporary ruleset files left behind", not sh("ls -A /etc/vpnpanel | grep '^.nft-'"))
+
+        # reversibility: flag off → back to the previous behaviour
+        post(f"/policies/{tp_id}", base)
+        time.sleep(3)
+        check("flag off removes the child from tunnel_blocked", c_ip not in nft_set("tunnel_blocked"))
+        after = (tcp_open("ec", TUNNEL_HOST, 1194), udp_echo("ec", TUNNEL_HOST, 51820))
+        check("VPN protocols allowed again after the flag is disabled", after == (True, True), str(after))
+        post(f"/members/{child_m}", {"name": "E2E Child", "type": "CHILD", "policy_id": strict_id, "notes": "", "csrf_token": t})
+
     # ---- disable / disconnect / revoke via the panel
     post(f"/devices/{c2_id}/disable", {"csrf_token": t})
     time.sleep(4)
@@ -308,7 +419,7 @@ def main():
     logs = sh("journalctl -u vpnpanel -u nginx --since '-30min' --no-pager | grep -c 'PRIVATE KEY'")
     check("no private key material in service logs", logs in ("0", ""), logs)
 
-    for n in ("ea", "ec", "ed"):
+    for n in ("ea", "ec", "ed", "eg"):
         sh(f"/usr/local/sbin/vpn-nstest down {n}")
     passed = sum(ok for _, ok in results)
     print(f"\n{passed}/{len(results)} checks passed")
