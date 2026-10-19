@@ -400,8 +400,9 @@ def main():
     names = [c["cn"] for c in st["clients"]]
     check("revoked device dropped, others stay", c_cn not in names and a_cn in names and c2_cn in names, str(names))
     sh("/usr/local/sbin/vpn-nstest down ec")
+    since = int(time.time()) - 2  # count rejections from this attempt only, however long it takes
     out = sh(f"/usr/local/sbin/vpn-nstest up ec {c_prof}", timeout=150)
-    crl = sh(f"journalctl -u openvpn-server@server --since '-1min' --no-pager | grep -c 'certificate revoked: CN={c_cn}'")
+    crl = sh(f"journalctl -u openvpn-server@server --since '@{since}' --no-pager | grep -c 'certificate revoked: CN={c_cn}'")
     check("revoked device cannot reconnect (CRL)", "NOT connected" in out and int(crl or 0) >= 1, f"crl rejects={crl}")
     exit_ip = ns("ea", f"curl -4 -s -m 10 {EGRESS_URL}")
     check("other device still functional", exit_ip == EGRESS if EGRESS else bool(exit_ip), exit_ip)
