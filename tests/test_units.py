@@ -329,3 +329,24 @@ def test_nft_extra_resolvers_from_config(helper):
                 helper.configure({"EXTRA_BLOCKED_RESOLVERS": bad})
     finally:
         helper.configure({"VPN_PUBLIC_HOST": "203.0.113.10", "VPN_IPV6_SUBNET": "fd00:db8:1:1::/64"})
+
+
+def test_helper_subprocesses_get_a_fixed_minimal_environment(helper, monkeypatch):
+    """Root subprocesses must not inherit caller-controlled variables, even if a sudoers change
+    ever stopped resetting the environment."""
+    import subprocess as sp
+    seen = {}
+
+    def fake_run(cmd, env=None, **kw):
+        seen["env"] = env
+        return sp.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(helper.subprocess, "run", fake_run)
+    for hostile in ("OPENSSL_CONF", "EASYRSA_VARS_FILE", "LD_PRELOAD", "NFT_PATH"):
+        monkeypatch.setenv(hostile, "/tmp/evil")
+    helper.easyrsa(["gen-crl"])
+    env = seen["env"]
+    assert not {"OPENSSL_CONF", "EASYRSA_VARS_FILE", "LD_PRELOAD", "NFT_PATH"} & set(env)
+    assert env["PATH"] == "/usr/sbin:/usr/bin:/sbin:/bin" and env["EASYRSA_BATCH"] == "1"
+    helper.run(["true"])
+    assert set(seen["env"]) <= {"PATH", "LANG", "LC_ALL"}
+

@@ -154,8 +154,13 @@ def check_client_ip(ip):
     return str(addr)
 
 
+SAFE_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+
+
 def run(cmd, env=None, check=True, input_data=None):
-    e = dict(os.environ)
+    # Fixed, minimal environment: nothing from the caller reaches root subprocesses, even if the
+    # sudo policy were ever changed to keep variables (OPENSSL_CONF, EASYRSA_*, LD_* ...).
+    e = dict(SAFE_ENV)
     if env:
         e.update(env)
     p = subprocess.run(cmd, env=e, input=input_data, capture_output=True, text=True)
