@@ -149,3 +149,32 @@ def test_security_headers(client, token):
 def test_logout(client, token):
     assert client.post("/logout", data={"csrf_token": token}, follow_redirects=False).status_code == 303
     assert client.get("/", follow_redirects=False).status_code == 303
+
+
+SAFE_NEXT = ["/devices", "/devices/3?created=1", "/dns?device=2&q=a.example"]
+UNSAFE_NEXT = ["//evil.example", "/\\evil.example", "/\\/evil.example", "/\t/evil.example", "/\n/evil.example",
+               "https://evil.example", "javascript:alert(1)", "evil.example", "/%5C%5Cevil.example", "/%2F/evil.example"]
+
+
+def _login_with_next(nxt):
+    with TestClient(main.app, base_url="http://testserver") as c:
+        r = c.get("/login")
+        return c.post("/login", data={"username": "tester", "password": PASSWORD, "login_csrf": login_csrf(r.text),
+                                      "next": nxt}, follow_redirects=False)
+
+
+@pytest.mark.parametrize("nxt", SAFE_NEXT)
+def test_login_redirect_keeps_local_paths(client, nxt):
+    r = _login_with_next(nxt)
+    assert r.status_code == 303 and r.headers["location"] == nxt
+
+
+@pytest.mark.parametrize("nxt", UNSAFE_NEXT)
+def test_login_redirect_rejects_non_local_targets(client, nxt):
+    r = _login_with_next(nxt)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+
+
+def test_login_page_escapes_next(client):
+    r = client.get("/login", params={"next": '"><script>alert(1)</script>'})
+    assert "<script>alert(1)" not in r.text

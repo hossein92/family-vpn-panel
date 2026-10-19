@@ -1,9 +1,11 @@
 """FastAPI application: routes for every admin panel section."""
 import json
 import logging
+import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -78,6 +80,20 @@ def back(ctx, fallback="/"):
     return ref if host and f"//{host}/" in ref else fallback
 
 
+_NEXT_RE = re.compile(r"^/(?![/\\])[A-Za-z0-9._~!$&'()*+,;=:@/?%-]*$")
+
+
+def safe_next(value):
+    """Only same-origin absolute paths. Rejects scheme/host forms, backslashes, control characters
+    and percent-encoded slashes that some browsers or proxies normalise into a host."""
+    if not isinstance(value, str) or len(value) > 512 or not _NEXT_RE.match(value):
+        return "/"
+    decoded = unquote(value)
+    if decoded.startswith(("//", "/\\")) or "\\" in decoded or any(ord(ch) < 32 or ord(ch) == 127 for ch in decoded):
+        return "/"
+    return value
+
+
 def get_or_404(sql, *args):
     row = db.q1(sql, *args)
     if not row:
@@ -134,7 +150,7 @@ def device_rows(ev=None, live=None):
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, next: str = "/"):
     tok = secrets.token_urlsafe(24)
-    resp = templates.TemplateResponse(request, "login.html", {"login_csrf": tok, "next": next, "error": None,
+    resp = templates.TemplateResponse(request, "login.html", {"login_csrf": tok, "next": safe_next(next), "error": None,
                                                               "fake": config.FAKE})
     resp.set_cookie(config.LOGIN_CSRF_COOKIE, tok, httponly=True, secure=config.SECURE_COOKIES,
                     samesite="strict", max_age=900, path="/")
@@ -147,9 +163,7 @@ async def login(request: Request):
     ip = client_ip(request)
     username = (form.get("username") or "").strip()[:64]
     password = form.get("password") or ""
-    nxt = form.get("next") or "/"
-    if not nxt.startswith("/") or nxt.startswith("//"):
-        nxt = "/"
+    nxt = safe_next(form.get("next") or "/")
 
     def fail(msg, code=400):
         tok = secrets.token_urlsafe(24)
