@@ -350,3 +350,10 @@ def test_helper_subprocesses_get_a_fixed_minimal_environment(helper, monkeypatch
     helper.run(["true"])
     assert set(seen["env"]) <= {"PATH", "LANG", "LC_ALL"}
 
+
+def test_scripts_do_not_use_fixed_paths_in_tmp():
+    for script in ("deploy/install.sh", "deploy/vpnpanel-backup", "deploy/make-panel-tls.sh"):
+        for ln in (ROOT / script).read_text().splitlines():
+            if ln.lstrip().startswith("#"):
+                continue
+            assert not re.search(r"/tmp/[A-Za-z0-9_.-]+", ln), f"{script}: {ln.strip()}"

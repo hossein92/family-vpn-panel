@@ -134,13 +134,13 @@ def device_id(html_url):
 def cleanup():
     """Remove E2E test members/devices (certificates are revoked, PKI history stays)."""
     db = "/var/lib/vpnpanel/vpnpanel.db"
-    rows = sh(f"sqlite3 {db} \"SELECT d.common_name, d.revoked FROM devices d JOIN family_members m ON m.id = d.family_member_id WHERE m.name LIKE 'E2E %'\"")
+    rows = sh(f"runuser -u vpnpanel -- sqlite3 {db} \"SELECT d.common_name, d.revoked FROM devices d JOIN family_members m ON m.id = d.family_member_id WHERE m.name LIKE 'E2E %'\"")
     for line in filter(None, rows.splitlines()):
         cn, rev = line.split("|")
         if rev == "0":
             sh(f"sudo -u vpnpanel sudo -n /usr/local/sbin/vpnpanel-helper revoke {cn} cessationOfOperation")
         sh(f"sudo -u vpnpanel sudo -n /usr/local/sbin/vpnpanel-helper ccd-delete {cn}")
-    sh(f"""sqlite3 {db} "PRAGMA foreign_keys=ON;
+    sh(f"""runuser -u vpnpanel -- sqlite3 {db} "PRAGMA foreign_keys=ON;
       DELETE FROM traffic_stats WHERE device_id IN (SELECT d.id FROM devices d JOIN family_members m ON m.id=d.family_member_id WHERE m.name LIKE 'E2E %');
       DELETE FROM connection_sessions WHERE device_id IN (SELECT d.id FROM devices d JOIN family_members m ON m.id=d.family_member_id WHERE m.name LIKE 'E2E %');
       UPDATE vpn_certificates SET device_id = NULL WHERE device_id IN (SELECT d.id FROM devices d JOIN family_members m ON m.id=d.family_member_id WHERE m.name LIKE 'E2E %');
@@ -414,7 +414,7 @@ def main():
     for a in ("device.created", "certificate.created", "certificate.revoked", "device.disabled", "profile.downloaded",
               "policy.assigned", "schedule.changed", "override.created", "admin.login"):
         check(f"audit: {a}", a in html2 or a in html)
-    leak = sh("sqlite3 /var/lib/vpnpanel/vpnpanel.db \"SELECT COUNT(*) FROM audit_logs WHERE details LIKE '%PRIVATE KEY%' OR details LIKE '%<key>%'\"")
+    leak = sh("runuser -u vpnpanel -- sqlite3 /var/lib/vpnpanel/vpnpanel.db \"SELECT COUNT(*) FROM audit_logs WHERE details LIKE '%PRIVATE KEY%' OR details LIKE '%<key>%'\"")
     check("no private key material in audit log", leak == "0", leak)
     logs = sh("journalctl -u vpnpanel -u nginx --since '-30min' --no-pager | grep -c 'PRIVATE KEY'")
     check("no private key material in service logs", logs in ("0", ""), logs)
