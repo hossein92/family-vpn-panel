@@ -2,6 +2,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -208,3 +209,59 @@ def test_helper_nft_apply_cleans_temp_file_on_failure(helper, tmp_path, monkeypa
     with pytest.raises(helper.HelperError):
         helper.v_nft_apply()
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------- backup script (least privilege)
+
+BACKUP = ROOT / "deploy" / "vpnpanel-backup"
+
+
+def test_backup_never_opens_panel_database_as_root():
+    """The database lives in a directory the unprivileged panel controls. Root must not open it
+    (symlink swaps, attacker-shaped SQLite content, root-owned -wal/-shm locking the panel out)."""
+    code = [ln for ln in BACKUP.read_text().splitlines() if not ln.lstrip().startswith("#")]
+    for ln in code:
+        assert not re.search(r'\bsqlite3\s+"?\$DB', ln), ln
+    assert any(re.search(r"runuser -u \"\$PANEL_USER\" --", ln) and "$DB" in ln for ln in code)
+
+
+def _dump_snippet():
+    m = re.search(r"DUMP_DB_PY='(.*?)'", BACKUP.read_text(), re.S)
+    assert m, "dump snippet not found"
+    return m.group(1)
+
+
+def test_backup_dump_is_consistent_and_restorable(tmp_path):
+    import sqlite3
+    import subprocess
+    import sys
+    src = tmp_path / "vpnpanel.db"
+    con = sqlite3.connect(src)
+    con.execute("PRAGMA journal_mode = WAL")
+    con.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+    con.executemany("INSERT INTO t(v) VALUES (?)", [(f"row{i}",) for i in range(500)])
+    con.commit()  # connection stays open: rows may still sit in the WAL
+    out = subprocess.run([sys.executable, "-I", "-c", _dump_snippet(), str(src)], capture_output=True, check=True)
+    restored = tmp_path / "restored.db"
+    restored.write_bytes(out.stdout)
+    r = sqlite3.connect(restored)
+    assert r.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert r.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 500
+    con.close()
+
+
+def test_backup_dump_refuses_a_non_database(tmp_path):
+    import subprocess
+    import sys
+    bogus = tmp_path / "vpnpanel.db"
+    bogus.write_text("root:x:0:0:not a database\n")
+    p = subprocess.run([sys.executable, "-I", "-c", _dump_snippet(), str(bogus)], capture_output=True)
+    assert p.returncode != 0 and p.stdout == b""
+
+
+def test_backup_dump_does_not_create_a_missing_database(tmp_path):
+    import subprocess
+    import sys
+    missing = tmp_path / "vpnpanel.db"
+    p = subprocess.run([sys.executable, "-I", "-c", _dump_snippet(), str(missing)], capture_output=True)
+    assert p.returncode != 0 and not missing.exists()
