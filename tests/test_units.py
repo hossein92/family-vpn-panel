@@ -133,10 +133,8 @@ def test_helper_rejects_bad_interface(helper):
 
 
 def test_helper_nft_rendering(helper):
-    text = helper.NFT_TEMPLATE.format(
-        no_internet=helper._elements(["10.8.0.51"]), children=helper._elements(["10.8.0.51", "10.8.0.50"]),
-        panel_admins="", vpn_if="tun0", server_ip=helper.SERVER_IP, vpn_net=helper.VPN_NET,
-        admin_port=8443, adguard_port=3080)
+    text = helper.render_nft({"no_internet": ["10.8.0.51"], "children": ["10.8.0.51", "10.8.0.50"],
+                              "panel_admins": []})
     assert "elements = { 10.8.0.50, 10.8.0.51 }" in text
     assert "dnat ip to 10.8.0.1" in text and "169.254.0.0/16" in text
     assert "flush ruleset" not in text
@@ -265,3 +263,69 @@ def test_backup_dump_does_not_create_a_missing_database(tmp_path):
     missing = tmp_path / "vpnpanel.db"
     p = subprocess.run([sys.executable, "-I", "-c", _dump_snippet(), str(missing)], capture_output=True)
     assert p.returncode != 0 and not missing.exists()
+
+
+# ---------------------------------------------------------------- policy-aware bypass restrictions (nftables)
+
+EMPTY_STATE = {"no_internet": [], "children": [], "panel_admins": []}
+
+
+def _rule_lines(text):
+    return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+
+
+def test_nft_old_state_renders_exactly_the_previous_rules(helper):
+    """An apply without the new keys (older panel) keeps every previous rule; new sets are empty."""
+    text = helper.render_nft(dict(EMPTY_STATE, children=["10.8.0.50"]))
+    for rule in ['ip daddr != 10.8.0.1 udp dport 53 counter dnat ip to 10.8.0.1',
+                 'ip saddr @children tcp dport 853 counter reject with tcp reset',
+                 'meta nfproto ipv6 counter reject with icmpx admin-prohibited',
+                 'ip daddr @private4 counter reject with icmpx admin-prohibited']:
+        assert any(rule in ln for ln in _rule_lines(text)), rule
+    assert re.search(r"set bypass_protected \{ type ipv4_addr;\s*\}", text)
+    assert re.search(r"set tunnel_blocked \{ type ipv4_addr;\s*\}", text)
+
+
+def test_nft_bypass_rules_only_apply_to_flagged_devices(helper):
+    text = helper.render_nft(dict(EMPTY_STATE, bypass_protected=["10.8.0.60"], tunnel_blocked=["10.8.0.61"]))
+    lines = _rule_lines(text)
+    resolver_rules = [ln for ln in lines if "@dns_resolvers" in ln]
+    assert resolver_rules and all("ip saddr @bypass_protected" in ln for ln in resolver_rules)
+    tunnel_rules = [ln for ln in lines if "1194" in ln or "51820" in ln or "esp" in ln]
+    assert tunnel_rules and all("ip saddr @tunnel_blocked" in ln for ln in tunnel_rules)
+    assert "elements = { 10.8.0.60 }" in text and "elements = { 10.8.0.61 }" in text
+    # nothing blocks ordinary web traffic
+    assert not any(re.search(r"dport (443|80)\b", ln) or "{ 443" in ln for ln in lines)
+
+
+def test_nft_resolver_set_is_public_dns_only(helper):
+    import ipaddress
+    nets = [ipaddress.ip_network(n) for n in helper.DNS_RESOLVERS]
+    assert ipaddress.ip_network("1.1.1.1/32") in nets and ipaddress.ip_network("9.9.9.9/32") in nets
+    assert all(n.version == 4 and n.is_global and n.num_addresses <= 256 for n in nets)
+
+
+def test_nft_bypass_state_ips_are_validated(helper):
+    for bad in (["192.0.2.1"], ["10.8.0.1"], ["10.8.0.5; flush ruleset"]):
+        with pytest.raises(helper.HelperError):
+            helper.render_nft(dict(EMPTY_STATE, bypass_protected=bad))
+    with pytest.raises(helper.HelperError):
+        helper.render_nft(dict(EMPTY_STATE, tunnel_blocked="10.8.0.60"))  # must be a list
+    with pytest.raises(helper.HelperError):
+        helper.render_nft(["not", "an", "object"])
+
+
+def test_nft_extra_resolvers_from_config(helper):
+    try:
+        helper.configure({"VPN_PUBLIC_HOST": "203.0.113.10", "VPN_IPV6_SUBNET": "fd00:db8:1:1::/64",
+                          "EXTRA_BLOCKED_RESOLVERS": "45.90.28.0/24, 45.90.30.53"})
+        text = helper.render_nft(EMPTY_STATE)
+        assert "45.90.28.0/24" in text and "45.90.30.53" in text
+        for bad_doc in ("198.51.100.53",):  # documentation ranges are not public
+            with pytest.raises(ValueError):
+                helper.configure({"EXTRA_BLOCKED_RESOLVERS": bad_doc})
+        for bad in ("10.0.0.0/8", "0.0.0.0/0", "fd00::1", "nonsense", "100.64.0.1"):
+            with pytest.raises(ValueError):
+                helper.configure({"EXTRA_BLOCKED_RESOLVERS": bad})
+    finally:
+        helper.configure({"VPN_PUBLIC_HOST": "203.0.113.10", "VPN_IPV6_SUBNET": "fd00:db8:1:1::/64"})
