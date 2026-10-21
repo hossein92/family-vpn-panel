@@ -21,13 +21,29 @@ load_env() {
 [ -r /etc/vpnpanel/panel.env ] && load_env /etc/vpnpanel/panel.env
 DEST=${BACKUP_DIR:-/var/backups/family-vpn-panel}
 DB=${DATABASE_PATH:-/var/lib/vpnpanel/vpnpanel.db}
+PANEL_USER=${PANEL_USER:-vpnpanel}
 KEEP=${BACKUP_KEEP:-14}
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 install -d -m 700 "$DEST"
 
-sqlite3 "$DB" ".backup '$WORK/vpnpanel.db'"
+# The database lives in a directory the unprivileged panel owns, so root never opens it:
+# the panel user takes a consistent online snapshot (SQLite backup API, WAL-safe), checks its
+# integrity and streams it over a pipe into this root-only directory. This avoids symlink swaps,
+# root parsing panel-controlled data, and root-owned -wal/-shm files that would lock the panel out.
+DUMP_DB_PY='
+import sqlite3, sys, urllib.parse
+src = sqlite3.connect("file:" + urllib.parse.quote(sys.argv[1]) + "?mode=rw", uri=True, timeout=30)
+mem = sqlite3.connect(":memory:")
+src.backup(mem)
+src.close()
+if mem.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+    sys.exit("database snapshot failed its integrity check")
+sys.stdout.buffer.write(mem.serialize())
+'
+(cd / && runuser -u "$PANEL_USER" -- /usr/bin/python3 -I -c "$DUMP_DB_PY" "$DB") > "$WORK/vpnpanel.db"
+[ -s "$WORK/vpnpanel.db" ] || { echo "database snapshot is empty" >&2; exit 1; }
 iptables-save > "$WORK/iptables.rules"
 nft list ruleset > "$WORK/nft.ruleset"
 ufw status verbose > "$WORK/ufw-status.txt"

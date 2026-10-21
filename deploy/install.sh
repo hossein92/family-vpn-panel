@@ -351,7 +351,8 @@ install -m 644 "$SRC/requirements.txt" /opt/vpnpanel/requirements.txt
 
 say "panel: root helper, sudoers, tools"
 install -m 750 -o root -g vpnpanel "$SRC/helper/vpnpanel-helper" /usr/local/sbin/vpnpanel-helper
-cat > /tmp/vpnpanel.sudoers <<'EOF'
+SUDOERS_TMP=$(mktemp /etc/sudoers.d/.vpnpanel.XXXXXX)  # root-only directory, unpredictable name
+cat > "$SUDOERS_TMP" <<'EOF'
 # Family VPN Panel: the web service may run ONLY its validating root helper.
 # Read-only polling verbs (every 15 s) are not logged; all changing verbs are.
 Cmnd_Alias VPNPANEL_READ = /usr/local/sbin/vpnpanel-helper mgmt-status, \
@@ -362,8 +363,8 @@ Cmnd_Alias VPNPANEL_READ = /usr/local/sbin/vpnpanel-helper mgmt-status, \
 Defaults!VPNPANEL_READ !log_allowed, !pam_session
 vpnpanel ALL=(root) NOPASSWD: /usr/local/sbin/vpnpanel-helper
 EOF
-visudo -cf /tmp/vpnpanel.sudoers >/dev/null
-install -m 440 -o root -g root /tmp/vpnpanel.sudoers /etc/sudoers.d/50-vpnpanel; rm -f /tmp/vpnpanel.sudoers
+visudo -cf "$SUDOERS_TMP" >/dev/null || { rm -f "$SUDOERS_TMP"; die "generated sudoers rule failed visudo -c"; }
+install -m 440 -o root -g root "$SUDOERS_TMP" /etc/sudoers.d/50-vpnpanel; rm -f "$SUDOERS_TMP"
 install -m 755 "$SRC/deploy/vpnpanel-admin" /usr/local/sbin/vpnpanel-admin
 install -m 700 "$SRC/deploy/vpnpanel-backup" /usr/local/sbin/vpnpanel-backup
 install -m 700 "$SRC/tools/vpn-nstest" /usr/local/sbin/vpn-nstest

@@ -29,6 +29,7 @@ After changing it: `sudo deploy/install.sh` (re-renders nginx/TLS-dependent piec
 | `DATABASE_PATH` | `/var/lib/vpnpanel/vpnpanel.db` | SQLite database. |
 | `BACKUP_DIR` | `/var/backups/family-vpn-panel` | Nightly backup destination (0700). |
 | `ADGUARD_URL` | `http://127.0.0.1:3080` | AdGuard Home API (loopback). |
+| `EXTRA_BLOCKED_RESOLVERS` | *(empty)* | Comma-separated public IPv4 addresses or networks (/16 or smaller) added to the resolver set that *Prevent filter bypass* blocks in the firewall. Private, shared and documentation ranges are refused. |
 
 Other files in `/etc/vpnpanel/`:
 

@@ -149,3 +149,144 @@ def test_security_headers(client, token):
 def test_logout(client, token):
     assert client.post("/logout", data={"csrf_token": token}, follow_redirects=False).status_code == 303
     assert client.get("/", follow_redirects=False).status_code == 303
+
+
+SAFE_NEXT = ["/devices", "/devices/3?created=1", "/dns?device=2&q=a.example"]
+UNSAFE_NEXT = ["//evil.example", "/\\evil.example", "/\\/evil.example", "/\t/evil.example", "/\n/evil.example",
+               "https://evil.example", "javascript:alert(1)", "evil.example", "/%5C%5Cevil.example", "/%2F/evil.example"]
+
+
+def _login_with_next(nxt):
+    with TestClient(main.app, base_url="http://testserver") as c:
+        r = c.get("/login")
+        return c.post("/login", data={"username": "tester", "password": PASSWORD, "login_csrf": login_csrf(r.text),
+                                      "next": nxt}, follow_redirects=False)
+
+
+@pytest.mark.parametrize("nxt", SAFE_NEXT)
+def test_login_redirect_keeps_local_paths(client, nxt):
+    r = _login_with_next(nxt)
+    assert r.status_code == 303 and r.headers["location"] == nxt
+
+
+@pytest.mark.parametrize("nxt", UNSAFE_NEXT)
+def test_login_redirect_rejects_non_local_targets(client, nxt):
+    r = _login_with_next(nxt)
+    assert r.status_code == 303 and r.headers["location"] == "/"
+
+
+def test_login_page_escapes_next(client):
+    r = client.get("/login", params={"next": '"><script>alert(1)</script>'})
+    assert "<script>alert(1)" not in r.text
+
+
+@pytest.mark.parametrize("referer,expected", [
+    ("http://testserver/devices?show=all", "/devices?show=all"),
+    ("https://evil.example/?x=//testserver/", "/schedules"),
+    ("https://evil.example//testserver/devices", "/schedules"),
+    ("http://testserver.evil.example/devices", "/schedules"),
+    ("", "/schedules"),
+])
+def test_back_redirect_only_follows_same_origin_referer(client, referer, expected):
+    with TestClient(main.app, base_url="http://testserver") as c:
+        r = c.get("/login")
+        c.post("/login", data={"username": "tester", "password": PASSWORD, "login_csrf": login_csrf(r.text)})
+        token = csrf(c.get("/").text)
+        if not db.q1("SELECT 1 FROM family_members WHERE name = 'Ref Test'"):
+            c.post("/members", data={"csrf_token": token, "name": "Ref Test", "type": "ADULT"})
+        mid = db.q1("SELECT id FROM family_members WHERE name = 'Ref Test'")["id"]
+        r = c.post(f"/schedules/{mid}/override/cancel", data={"csrf_token": token},
+                    headers={"referer": referer} if referer else {}, follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == expected
+
+
+def _policy_id(name):
+    return db.q1("SELECT id FROM policies WHERE name = ?", name)["id"]
+
+
+def test_bypass_and_tunnel_sets_follow_policy_flags(client):
+    """Prevent-filter-bypass → bypass_protected; new opt-in flag → tunnel_blocked; others untouched."""
+    with TestClient(main.app, base_url="http://testserver") as c:
+        r = c.get("/login")
+        c.post("/login", data={"username": "tester", "password": PASSWORD, "login_csrf": login_csrf(r.text)})
+        tok = csrf(c.get("/").text)
+        ids = {}
+        for name, mtype in (("Fw Kid", "CHILD"), ("Fw Adult", "ADULT"), ("Fw Guest", "GUEST")):
+            if not db.q1("SELECT 1 FROM family_members WHERE name = ?", name):
+                c.post("/members", data={"csrf_token": tok, "name": name, "type": mtype})
+            mid = db.q1("SELECT id FROM family_members WHERE name = ?", name)["id"]
+            c.post("/devices", data={"csrf_token": tok, "member_id": mid, "display_name": f"{name} laptop"})
+            ids[mtype] = db.q1("SELECT vpn_ipv4 FROM devices WHERE family_member_id = ? ORDER BY id DESC", mid)[0]
+        pid = _policy_id("Child — standard")
+        form = {"csrf_token": tok, "name": "Child — standard", "kind": "CHILD", "block_malware": "on",
+                "block_adult": "on", "block_gambling": "on", "block_encrypted_dns": "on", "safesearch": "on",
+                "youtube_restricted": "on"}
+        c.post(f"/policies/{pid}", data=form)                  # Prevent filter bypass on, VPN flag off
+        nft = engine.desired_state()["nft"]
+        assert ids["CHILD"] in nft["bypass_protected"]
+        assert ids["ADULT"] not in nft["bypass_protected"] and ids["GUEST"] not in nft["bypass_protected"]
+        assert ids["CHILD"] not in nft["tunnel_blocked"]       # opt-in, default off
+        page = c.get(f"/policies/{pid}").text
+        assert 'name="block_vpn_protocols"' in page
+        form["block_vpn_protocols"] = "on"
+        c.post(f"/policies/{pid}", data=form)
+        nft = engine.desired_state()["nft"]
+        assert ids["CHILD"] in nft["tunnel_blocked"] and ids["ADULT"] not in nft["tunnel_blocked"]
+        audit_row = db.q1("SELECT details FROM audit_logs WHERE action = 'policy.changed' ORDER BY id DESC")
+        assert "block_vpn_protocols" in audit_row["details"]
+
+        c.post("/policies", data={"csrf_token": tok, "clone_from": pid, "name": "Fw clone"})
+        assert db.q1("SELECT block_vpn_protocols FROM policies WHERE name = 'Fw clone'")[0] == 1
+
+        form.pop("block_vpn_protocols")
+        form.pop("block_encrypted_dns")
+        c.post(f"/policies/{pid}", data=form)                  # turning the flags off removes the device again
+        nft = engine.desired_state()["nft"]
+        assert ids["CHILD"] not in nft["tunnel_blocked"] and ids["CHILD"] not in nft["bypass_protected"]
+        assert ids["CHILD"] in nft["children"]                   # pre-existing child rules unchanged
+        form["block_encrypted_dns"] = "on"
+        c.post(f"/policies/{pid}", data=form)
+
+
+def test_existing_database_gains_new_policy_column(tmp_path, monkeypatch):
+    import sqlite3
+    old = tmp_path / "old.db"
+    con = sqlite3.connect(old)
+    con.executescript(db.SCHEMA.replace("    block_vpn_protocols INTEGER NOT NULL DEFAULT 0,\n", ""))
+    con.execute("INSERT INTO policies(name, kind, created_at, updated_at) VALUES ('Legacy', 'CHILD', 'x', 'x')")
+    con.commit()
+    con.close()
+    monkeypatch.setattr(config, "DB_PATH", old)
+    monkeypatch.setattr(db._local, "conn", None)
+    db.init()
+    row = db.q1("SELECT block_vpn_protocols FROM policies WHERE name = 'Legacy'")
+    assert row[0] == 0
+    db.get().close()
+    monkeypatch.setattr(db._local, "conn", None)
+
+
+def test_migration_tolerates_a_concurrent_process(tmp_path):
+    """Panel and vpnpanel-admin can start together: if another process adds the column between our
+    check and our ALTER, init must not crash."""
+    import sqlite3
+    path = tmp_path / "race.db"
+    real = sqlite3.connect(path)
+    real.executescript(db.SCHEMA.replace("    block_vpn_protocols INTEGER NOT NULL DEFAULT 0,\n", ""))
+
+    class StaleCheck:
+        """Reports the column as missing once, after another 'process' already added it."""
+        def __init__(self, conn):
+            self.conn, self.first = conn, True
+
+        def execute(self, sql, *a):
+            if sql.startswith("PRAGMA table_info") and self.first:
+                self.first = False
+                sqlite3.connect(path).execute("ALTER TABLE policies ADD COLUMN block_vpn_protocols "
+                                              "INTEGER NOT NULL DEFAULT 0")
+                return iter([])
+            return self.conn.execute(sql, *a)
+
+    db._migrate(StaleCheck(real))
+    cols = {r[1] for r in real.execute("PRAGMA table_info(policies)")}
+    assert "block_vpn_protocols" in cols
+    real.close()

@@ -1,0 +1,8 @@
+# Disposable lab server for tests/integration (never used in CI or production).
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && apt-get install -y -qq systemd systemd-sysv openssh-server sudo curl dnsutils \
+      iproute2 iputils-ping python3 sqlite3 ufw nftables iptables openvpn easy-rsa nginx python3-venv \
+      python3-yaml openssl ca-certificates >/dev/null && apt-get clean && rm -rf /var/lib/apt/lists/*
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]

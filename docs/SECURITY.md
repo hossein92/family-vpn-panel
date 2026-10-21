@@ -40,7 +40,10 @@ The web process runs as `vpnpanel` with no special rights. One sudoers rule allo
 * accepts a fixed set of verbs, at most 4 short arguments, and validates each one
   (Common Name `^[a-z0-9][a-z0-9-]{1,62}$`, IPs inside the VPN subnet, revocation reasons from a list);
 * reads its configuration only from the root-owned `/etc/vpnpanel/panel.env`, runs Python in isolated
-  mode with a fixed `PATH` and `umask 077`;
+  mode with a fixed `PATH` and `umask 077`, and starts every subprocess with a fixed minimal
+  environment (nothing from the caller is passed on);
+* validates the whole firewall state it is given and replaces the `inet vpnpanel` table in one atomic
+  transaction; a refused or failing apply leaves the live table and no temporary files behind;
 * never prints key material; read-only polling verbs are excluded from sudo logging, all changing
   verbs are logged.
 
@@ -62,6 +65,10 @@ The web process runs as `vpnpanel` with no special rights. One sudoers rule allo
 * VPN clients cannot reach RFC 1918, CGNAT, link-local (incl. cloud metadata `169.254.169.254`),
   loopback or other VPN clients; spoofed sources are dropped.
 * DNS from the tunnel is always redirected to the filtering resolver; children cannot use DoT/DoQ.
+* Policy-scoped, opt-in restrictions: *Prevent filter bypass* also blocks port 853 and well-known
+  public resolver addresses; *Block VPN and proxy protocols* blocks standard VPN/proxy ports. See
+  [DNS-FILTERING.md](DNS-FILTERING.md#what-network-level-controls-cannot-guarantee) for what these
+  controls cannot guarantee.
 * IPv6: captured in the tunnel and refused (`block-ipv6`) instead of leaking outside the VPN.
 * AdGuard Home and the panel app listen on loopback / the VPN address only.
 
@@ -85,7 +92,8 @@ contents, messages, banking data or decrypted TLS traffic. See
 1. Keep SSH key-only (`PasswordAuthentication no`, `PermitRootLogin no`); consider fail2ban or
    restricting port 22 to known addresses. Check `sshd -T`, since cloud images sometimes ship drop-in
    files that re-enable password login.
-2. Treat backups like the CA key: root-only on the server, encrypted when copied elsewhere.
+2. Treat backups like the CA key: root-only on the server, encrypted when copied elsewhere. The
+   backup job reads the panel database as the panel user, never as root.
 3. Consider keeping the CA key offline if you rarely add devices.
 4. Revoke lost devices immediately; review *Security & revocation* and the audit log occasionally.
 5. Keep the OS updated (unattended-upgrades) and update AdGuard Home deliberately.

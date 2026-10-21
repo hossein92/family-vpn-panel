@@ -2,6 +2,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -132,10 +133,8 @@ def test_helper_rejects_bad_interface(helper):
 
 
 def test_helper_nft_rendering(helper):
-    text = helper.NFT_TEMPLATE.format(
-        no_internet=helper._elements(["10.8.0.51"]), children=helper._elements(["10.8.0.51", "10.8.0.50"]),
-        panel_admins="", vpn_if="tun0", server_ip=helper.SERVER_IP, vpn_net=helper.VPN_NET,
-        admin_port=8443, adguard_port=3080)
+    text = helper.render_nft({"no_internet": ["10.8.0.51"], "children": ["10.8.0.51", "10.8.0.50"],
+                              "panel_admins": []})
     assert "elements = { 10.8.0.50, 10.8.0.51 }" in text
     assert "dnat ip to 10.8.0.1" in text and "169.254.0.0/16" in text
     assert "flush ruleset" not in text
@@ -150,3 +149,252 @@ def test_helper_env_reader(helper, tmp_path):
 def test_helper_output_is_json(helper, capsys):
     helper.out({"ok": True})
     assert json.loads(capsys.readouterr().out) == {"ok": True}
+
+
+# ---------------------------------------------------------------- root helper hardening (regressions)
+
+def _closing_unix_server(path):
+    """A management socket that accepts and immediately closes (OpenVPN restarting)."""
+    import socket as _s
+    import threading
+    srv = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+    srv.bind(str(path))
+    srv.listen(4)
+
+    def loop():
+        while True:
+            try:
+                c, _ = srv.accept()
+            except OSError:
+                return
+            c.close()
+    threading.Thread(target=loop, daemon=True).start()
+    return srv
+
+
+def test_helper_mgmt_eof_during_banner_does_not_hang(helper, tmp_path, monkeypatch):
+    import tempfile
+    import threading
+    sock = Path(tempfile.mkdtemp(prefix="vp", dir="/tmp" if Path("/tmp").is_dir() else None)) / "m.sock"
+    srv = _closing_unix_server(sock)
+    monkeypatch.setattr(helper, "MGMT_SOCK", str(sock))
+    result = {}
+
+    def call():
+        try:
+            helper._mgmt("status 3", timeout=1.0)
+            result["r"] = "returned"
+        except OSError as e:
+            result["r"] = type(e).__name__
+
+    t = threading.Thread(target=call, daemon=True)
+    t.start()
+    t.join(5)
+    srv.close()
+    assert not t.is_alive(), "helper spins forever when the management socket closes before the banner"
+    assert result["r"] == "ConnectionError"
+
+
+def test_helper_nft_apply_cleans_temp_file_on_failure(helper, tmp_path, monkeypatch):
+    import io
+    monkeypatch.setattr(helper, "NFT_DIR", str(tmp_path), raising=False)
+    monkeypatch.setattr(helper, "NFT_FILE", str(tmp_path / "vpnpanel.nft"))
+    monkeypatch.setattr(helper.sys, "stdin", io.StringIO('{"no_internet": [], "children": [], "panel_admins": []}'))
+
+    def boom(cmd, **kw):
+        raise helper.HelperError("nft failed: syntax error")
+    monkeypatch.setattr(helper, "run", boom)
+    with pytest.raises(helper.HelperError):
+        helper.v_nft_apply()
+    assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------- backup script (least privilege)
+
+BACKUP = ROOT / "deploy" / "vpnpanel-backup"
+
+
+def test_backup_never_opens_panel_database_as_root():
+    """The database lives in a directory the unprivileged panel controls. Root must not open it
+    (symlink swaps, attacker-shaped SQLite content, root-owned -wal/-shm locking the panel out)."""
+    code = [ln for ln in BACKUP.read_text().splitlines() if not ln.lstrip().startswith("#")]
+    for ln in code:
+        assert not re.search(r'\bsqlite3\s+"?\$DB', ln), ln
+    assert any(re.search(r"runuser -u \"\$PANEL_USER\" --", ln) and "$DB" in ln for ln in code)
+
+
+def _dump_snippet():
+    m = re.search(r"DUMP_DB_PY='(.*?)'", BACKUP.read_text(), re.S)
+    assert m, "dump snippet not found"
+    return m.group(1)
+
+
+def test_backup_dump_is_consistent_and_restorable(tmp_path):
+    import sqlite3
+    import subprocess
+    import sys
+    src = tmp_path / "vpnpanel.db"
+    con = sqlite3.connect(src)
+    con.execute("PRAGMA journal_mode = WAL")
+    con.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+    con.executemany("INSERT INTO t(v) VALUES (?)", [(f"row{i}",) for i in range(500)])
+    con.commit()  # connection stays open: rows may still sit in the WAL
+    out = subprocess.run([sys.executable, "-I", "-c", _dump_snippet(), str(src)], capture_output=True, check=True)
+    restored = tmp_path / "restored.db"
+    restored.write_bytes(out.stdout)
+    r = sqlite3.connect(restored)
+    assert r.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert r.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 500
+    con.close()
+
+
+def test_backup_dump_refuses_a_non_database(tmp_path):
+    import subprocess
+    import sys
+    bogus = tmp_path / "vpnpanel.db"
+    bogus.write_text("root:x:0:0:not a database\n")
+    p = subprocess.run([sys.executable, "-I", "-c", _dump_snippet(), str(bogus)], capture_output=True)
+    assert p.returncode != 0 and p.stdout == b""
+
+
+def test_backup_dump_does_not_create_a_missing_database(tmp_path):
+    import subprocess
+    import sys
+    missing = tmp_path / "vpnpanel.db"
+    p = subprocess.run([sys.executable, "-I", "-c", _dump_snippet(), str(missing)], capture_output=True)
+    assert p.returncode != 0 and not missing.exists()
+
+
+# ---------------------------------------------------------------- policy-aware bypass restrictions (nftables)
+
+EMPTY_STATE = {"no_internet": [], "children": [], "panel_admins": []}
+
+
+def _rule_lines(text):
+    return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+
+
+def test_nft_old_state_renders_exactly_the_previous_rules(helper):
+    """An apply without the new keys (older panel) keeps every previous rule; new sets are empty."""
+    text = helper.render_nft(dict(EMPTY_STATE, children=["10.8.0.50"]))
+    for rule in ['ip daddr != 10.8.0.1 udp dport 53 counter dnat ip to 10.8.0.1',
+                 'ip saddr @children tcp dport 853 counter reject with tcp reset',
+                 'meta nfproto ipv6 counter reject with icmpx admin-prohibited',
+                 'ip daddr @private4 counter reject with icmpx admin-prohibited']:
+        assert any(rule in ln for ln in _rule_lines(text)), rule
+    assert re.search(r"set bypass_protected \{ type ipv4_addr;\s*\}", text)
+    assert re.search(r"set tunnel_blocked \{ type ipv4_addr;\s*\}", text)
+
+
+def test_nft_bypass_rules_only_apply_to_flagged_devices(helper):
+    text = helper.render_nft(dict(EMPTY_STATE, bypass_protected=["10.8.0.60"], tunnel_blocked=["10.8.0.61"]))
+    lines = _rule_lines(text)
+    resolver_rules = [ln for ln in lines if "@dns_resolvers" in ln]
+    assert resolver_rules and all("ip saddr @bypass_protected" in ln for ln in resolver_rules)
+    tunnel_rules = [ln for ln in lines if "1194" in ln or "51820" in ln or "esp" in ln]
+    assert tunnel_rules and all("ip saddr @tunnel_blocked" in ln for ln in tunnel_rules)
+    assert "elements = { 10.8.0.60 }" in text and "elements = { 10.8.0.61 }" in text
+    # nothing blocks ordinary web traffic
+    assert not any(re.search(r"dport (443|80)\b", ln) or "{ 443" in ln for ln in lines)
+
+
+def test_nft_resolver_set_is_public_dns_only(helper):
+    import ipaddress
+    nets = [ipaddress.ip_network(n) for n in helper.DNS_RESOLVERS]
+    assert ipaddress.ip_network("1.1.1.1/32") in nets and ipaddress.ip_network("9.9.9.9/32") in nets
+    assert all(n.version == 4 and n.is_global and n.num_addresses <= 256 for n in nets)
+
+
+def test_nft_bypass_state_ips_are_validated(helper):
+    for bad in (["192.0.2.1"], ["10.8.0.1"], ["10.8.0.5; flush ruleset"]):
+        with pytest.raises(helper.HelperError):
+            helper.render_nft(dict(EMPTY_STATE, bypass_protected=bad))
+    with pytest.raises(helper.HelperError):
+        helper.render_nft(dict(EMPTY_STATE, tunnel_blocked="10.8.0.60"))  # must be a list
+    with pytest.raises(helper.HelperError):
+        helper.render_nft(["not", "an", "object"])
+
+
+def test_nft_extra_resolvers_from_config(helper):
+    try:
+        helper.configure({"VPN_PUBLIC_HOST": "203.0.113.10", "VPN_IPV6_SUBNET": "fd00:db8:1:1::/64",
+                          "EXTRA_BLOCKED_RESOLVERS": "45.90.28.0/24, 45.90.30.53"})
+        text = helper.render_nft(EMPTY_STATE)
+        assert "45.90.28.0/24" in text and "45.90.30.53" in text
+        for bad_doc in ("198.51.100.53",):  # documentation ranges are not public
+            helper.configure({"EXTRA_BLOCKED_RESOLVERS": bad_doc})
+            with pytest.raises(helper.HelperError):
+                helper.render_nft(EMPTY_STATE)
+        for bad in ("10.0.0.0/8", "0.0.0.0/0", "fd00::1", "nonsense", "100.64.0.1"):
+            helper.configure({"EXTRA_BLOCKED_RESOLVERS": bad})
+            with pytest.raises(helper.HelperError):
+                helper.render_nft(EMPTY_STATE)
+    finally:
+        helper.configure({"VPN_PUBLIC_HOST": "203.0.113.10", "VPN_IPV6_SUBNET": "fd00:db8:1:1::/64"})
+
+
+def test_helper_subprocesses_get_a_fixed_minimal_environment(helper, monkeypatch):
+    """Root subprocesses must not inherit caller-controlled variables, even if a sudoers change
+    ever stopped resetting the environment."""
+    import subprocess as sp
+    seen = {}
+
+    def fake_run(cmd, env=None, **kw):
+        seen["env"] = env
+        return sp.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(helper.subprocess, "run", fake_run)
+    for hostile in ("OPENSSL_CONF", "EASYRSA_VARS_FILE", "LD_PRELOAD", "NFT_PATH"):
+        monkeypatch.setenv(hostile, "/tmp/evil")
+    helper.easyrsa(["gen-crl"])
+    env = seen["env"]
+    assert not {"OPENSSL_CONF", "EASYRSA_VARS_FILE", "LD_PRELOAD", "NFT_PATH"} & set(env)
+    assert env["PATH"] == "/usr/sbin:/usr/bin:/sbin:/bin" and env["EASYRSA_BATCH"] == "1"
+    helper.run(["true"])
+    assert set(seen["env"]) <= {"PATH", "LANG", "LC_ALL"}
+
+
+def test_scripts_do_not_use_fixed_paths_in_tmp():
+    for script in ("deploy/install.sh", "deploy/vpnpanel-backup", "deploy/make-panel-tls.sh"):
+        for ln in (ROOT / script).read_text().splitlines():
+            if ln.lstrip().startswith("#"):
+                continue
+            assert not re.search(r"/tmp/[A-Za-z0-9_.-]+", ln), f"{script}: {ln.strip()}"
+
+
+def test_restore_procedure_discards_stale_wal_before_installing_database():
+    """Leftover -wal/-shm of the old database are replayed onto the restored file (verified in the
+    lab: rows written after the backup reappeared). The documented restore must remove them first."""
+    doc = (ROOT / "docs" / "OPERATIONS.md").read_text()
+    block = doc.split("## Restore", 1)[1].split("```bash", 1)[1].split("```", 1)[0]
+    lines = [ln.strip() for ln in block.splitlines()]
+    stop = next(i for i, ln in enumerate(lines) if ln.startswith("systemctl stop") and "vpnpanel" in ln)
+    rm = next(i for i, ln in enumerate(lines) if "vpnpanel.db-wal" in ln and "vpnpanel.db-shm" in ln and "rm -f" in ln)
+    inst = next(i for i, ln in enumerate(lines) if ln.startswith("install") and "vpnpanel.db" in ln)
+    assert stop < rm < inst
+
+
+# ---------------------------------------------------------------- final-review regressions
+
+def test_invalid_extra_resolvers_only_block_the_firewall_apply(helper):
+    """A typo in the optional EXTRA_BLOCKED_RESOLVERS must not disable revoke/CCD/status: only
+    nft-apply refuses (the live table stays as it is)."""
+    try:
+        helper.configure({"VPN_PUBLIC_HOST": "203.0.113.10", "VPN_IPV6_SUBNET": "fd00:db8:1:1::/64",
+                          "EXTRA_BLOCKED_RESOLVERS": "10.0.0.0/8"})          # must not raise
+        assert helper.check_cn("alex-phone") == "alex-phone"                 # other verbs keep working
+        with pytest.raises(helper.HelperError, match="EXTRA_BLOCKED_RESOLVERS"):
+            helper.render_nft(EMPTY_STATE)
+    finally:
+        helper.configure({"VPN_PUBLIC_HOST": "203.0.113.10", "VPN_IPV6_SUBNET": "fd00:db8:1:1::/64"})
+    helper.render_nft(EMPTY_STATE)
+
+
+def test_revoke_session_kill_tolerates_management_socket_failure(helper, monkeypatch):
+    """The CRL is already updated when sessions are killed; a dropped management socket at that
+    point must not turn a completed revocation into an error (DB and PKI would disagree)."""
+    monkeypatch.setattr(helper, "v_mgmt_status", lambda: {"clients": [{"cn": "alex-phone", "client_id": 7}]})
+
+    def broken(cmd, timeout=5.0):
+        raise ConnectionError("management interface closed the connection")
+    monkeypatch.setattr(helper, "_mgmt", broken)
+    assert helper._mgmt_kill_cn("alex-phone") == 0

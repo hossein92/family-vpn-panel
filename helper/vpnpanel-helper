@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 ENV_FILE = "/etc/vpnpanel/panel.env"
 MGMT_SOCK = "/run/openvpn-server/management.sock"
 NFT_FILE = "/etc/vpnpanel/vpnpanel.nft"
+NFT_DIR = "/etc/vpnpanel"
 
 
 def read_env_file(path):
@@ -45,6 +46,33 @@ def read_env_file(path):
             v = v[1:-1]
         values[k.strip()] = v
     return values
+
+
+# Well-known public DNS resolvers that also answer DNS-over-HTTPS/TLS/QUIC on their IP address.
+# These addresses are dedicated to DNS service (no shared web hosting), so blocking them for a
+# device with "Prevent filter bypass" stops encrypted DNS that needs no hostname lookup, while
+# plain DNS to them keeps working because port 53 is redirected to the filtering resolver.
+# Extend per deployment with EXTRA_BLOCKED_RESOLVERS in panel.env.
+DNS_RESOLVERS = (
+    # Cloudflare
+    "1.1.1.1", "1.0.0.1", "1.1.1.2", "1.0.0.2", "1.1.1.3", "1.0.0.3",
+    # Google Public DNS
+    "8.8.8.8", "8.8.4.4",
+    # Quad9
+    "9.9.9.9", "149.112.112.112", "9.9.9.10", "149.112.112.10", "9.9.9.11", "149.112.112.11",
+    # Cisco OpenDNS
+    "208.67.222.222", "208.67.220.220", "208.67.222.123", "208.67.220.123",
+    # AdGuard DNS
+    "94.140.14.14", "94.140.15.15", "94.140.14.15", "94.140.15.16", "94.140.14.140", "94.140.14.141",
+    # CleanBrowsing
+    "185.228.168.9", "185.228.169.9", "185.228.168.10", "185.228.169.11", "185.228.168.168", "185.228.169.168",
+    # Mullvad DNS
+    "194.242.2.2", "194.242.2.3", "194.242.2.4", "194.242.2.5", "194.242.2.6", "194.242.2.9",
+    # DNS.SB
+    "185.222.222.222", "45.11.45.11",
+)
+EXTRA_RESOLVERS = []
+EXTRA_RESOLVERS_ERROR = None
 
 
 def configure(values):
@@ -76,6 +104,20 @@ def configure(values):
         int(CFG[name])
     if not re.match(r"^[A-Za-z0-9.:-]{1,253}$", CFG["VPN_PUBLIC_HOST"]):
         raise ValueError("invalid VPN_PUBLIC_HOST")
+    # Optional setting: an invalid value must not disable unrelated verbs (revoke, CCD, status).
+    # It is recorded and only nft-apply refuses, leaving the live firewall table unchanged.
+    global EXTRA_RESOLVERS, EXTRA_RESOLVERS_ERROR
+    EXTRA_RESOLVERS, EXTRA_RESOLVERS_ERROR = [], None
+    try:
+        for item in filter(None, (x.strip() for x in CFG.get("EXTRA_BLOCKED_RESOLVERS", "").split(","))):
+            net = ipaddress.ip_network(item, strict=True)
+            if net.version != 4 or not net.is_global or net.prefixlen < 16:
+                raise ValueError(f"{item}: only public IPv4 addresses or networks of /16 or smaller")
+            EXTRA_RESOLVERS.append(str(net))
+        if len(EXTRA_RESOLVERS) > 256:
+            raise ValueError("at most 256 entries")
+    except ValueError as e:
+        EXTRA_RESOLVERS, EXTRA_RESOLVERS_ERROR = [], str(e)[:200]
 
 
 configure(read_env_file(ENV_FILE))
@@ -118,8 +160,13 @@ def check_client_ip(ip):
     return str(addr)
 
 
+SAFE_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+
+
 def run(cmd, env=None, check=True, input_data=None):
-    e = dict(os.environ)
+    # Fixed, minimal environment: nothing from the caller reaches root subprocesses, even if the
+    # sudo policy were ever changed to keep variables (OPENSSL_CONF, EASYRSA_*, LD_* ...).
+    e = dict(SAFE_ENV)
     if env:
         e.update(env)
     p = subprocess.run(cmd, env=e, input=input_data, capture_output=True, text=True)
@@ -340,7 +387,10 @@ def _mgmt(cmd, timeout=5.0):
     buf = b""
     try:
         while b"\n" not in buf:  # banner
-            buf += s.recv(4096)
+            chunk = s.recv(4096)
+            if not chunk:  # OpenVPN closed the socket (e.g. restarting): never spin as root
+                raise ConnectionError("management interface closed the connection")
+            buf += chunk
         s.sendall(cmd.encode() + b"\n")
         buf = b""
         deadline = time.time() + timeout
@@ -384,8 +434,11 @@ def _mgmt_kill_cn(cn):
     n = 0
     for c in st["clients"]:
         if c["cn"] == cn:
-            _mgmt(f"client-kill {c['client_id']} HALT")
-            n += 1
+            try:
+                _mgmt(f"client-kill {c['client_id']} HALT")
+                n += 1
+            except OSError:  # management socket went away; the CRL/CCD change is already in place
+                continue
     return n
 
 
@@ -409,6 +462,10 @@ table inet vpnpanel {{
     set no_internet {{ type ipv4_addr; {no_internet} }}
     set children {{ type ipv4_addr; {children} }}
     set panel_admins {{ type ipv4_addr; {panel_admins} }}
+    set bypass_protected {{ type ipv4_addr; {bypass_protected} }}
+    set tunnel_blocked {{ type ipv4_addr; {tunnel_blocked} }}
+    set dns_resolvers {{ type ipv4_addr; flags interval;
+        elements = {{ {dns_resolvers} }} }}
     set private4 {{ type ipv4_addr; flags interval;
         elements = {{ 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
                      172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/3 }} }}
@@ -438,33 +495,62 @@ table inet vpnpanel {{
         # Children: no DNS-over-TLS / DNS-over-QUIC bypass.
         iifname "{vpn_if}" ip saddr @children tcp dport 853 counter reject with tcp reset
         iifname "{vpn_if}" ip saddr @children udp dport 853 counter reject with icmpx admin-prohibited
+        # "Prevent filter bypass": encrypted DNS straight to well-known public resolvers (by IP) and
+        # DoT/DoQ anywhere. Plain DNS to these resolvers was already redirected to ours above.
+        iifname "{vpn_if}" ip saddr @bypass_protected ip daddr @dns_resolvers meta l4proto tcp counter reject with tcp reset
+        iifname "{vpn_if}" ip saddr @bypass_protected ip daddr @dns_resolvers counter reject with icmpx admin-prohibited
+        iifname "{vpn_if}" ip saddr @bypass_protected tcp dport 853 counter reject with tcp reset
+        iifname "{vpn_if}" ip saddr @bypass_protected udp dport 853 counter reject with icmpx admin-prohibited
+        # "Block VPN and proxy protocols" (opt-in policy flag): standard ports of common VPN/proxy
+        # protocols only. Tunnels over ordinary HTTPS (443) are deliberately NOT blocked.
+        iifname "{vpn_if}" ip saddr @tunnel_blocked meta l4proto {{ esp, ah, gre }} counter reject with icmpx admin-prohibited
+        iifname "{vpn_if}" ip saddr @tunnel_blocked udp dport {{ 500, 1194, 1701, 4500, 51820 }} counter reject with icmpx admin-prohibited
+        iifname "{vpn_if}" ip saddr @tunnel_blocked tcp dport {{ 1080, 1194, 1723 }} counter reject with tcp reset
     }}
 }}
 """
 
 
+NFT_SETS = ("no_internet", "children", "panel_admins", "bypass_protected", "tunnel_blocked")
+
+
 def _elements(ips):
+    if not isinstance(ips, list) or not all(isinstance(i, str) for i in ips):
+        raise HelperError("set members must be a list of address strings")
     ips = sorted({check_client_ip(i) for i in ips}, key=lambda s: ipaddress.ip_address(s))
     return f"elements = {{ {', '.join(ips)} }}" if ips else ""
 
 
-def v_nft_apply():
-    data = json.load(sys.stdin)
-    admins = list(data.get("panel_admins", []))
-    rendered = NFT_TEMPLATE.format(
-        no_internet=_elements(data.get("no_internet", [])),
-        children=_elements(data.get("children", [])),
-        panel_admins=_elements(admins),
+def render_nft(data):
+    """Full `inet vpnpanel` table for the given state. Sets missing from the state (older panel
+    versions) render empty, so the previous rules stay exactly as they were."""
+    if not isinstance(data, dict):
+        raise HelperError("nft state must be a JSON object")
+    if EXTRA_RESOLVERS_ERROR:
+        raise HelperError(f"invalid EXTRA_BLOCKED_RESOLVERS in panel.env ({EXTRA_RESOLVERS_ERROR}); "
+                          "firewall left unchanged")
+    sets = {name: _elements(data.get(name, [])) for name in NFT_SETS}
+    resolvers = sorted({*DNS_RESOLVERS, *EXTRA_RESOLVERS}, key=lambda n: ipaddress.ip_network(n))
+    return NFT_TEMPLATE.format(
+        **sets, dns_resolvers=", ".join(resolvers),
         vpn_if=VPN_IF, server_ip=SERVER_IP, vpn_net=VPN_NET, admin_port=int(CFG["ADMIN_PORT"]),
         adguard_port=int(CFG["ADGUARD_URL"].rsplit(":", 1)[-1].split("/")[0] or 3080),
     )
-    fd, tmp = tempfile.mkstemp(dir="/etc/vpnpanel", prefix=".nft-")
-    with os.fdopen(fd, "w") as f:
-        f.write(rendered)
-    run(["nft", "-c", "-f", tmp])  # syntax check first
-    run(["nft", "-f", tmp])        # atomic replace of our own table only
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, NFT_FILE)
+
+
+def v_nft_apply():
+    rendered = render_nft(json.load(sys.stdin))
+    fd, tmp = tempfile.mkstemp(dir=NFT_DIR, prefix=".nft-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(rendered)
+        run(["nft", "-c", "-f", tmp])  # syntax check first
+        run(["nft", "-f", tmp])        # atomic replace of our own table only
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, NFT_FILE)
+    finally:
+        if os.path.exists(tmp):  # never leave rendered rulesets behind after a failure
+            os.unlink(tmp)
     return {"ok": True}
 
 

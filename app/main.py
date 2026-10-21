@@ -1,9 +1,11 @@
 """FastAPI application: routes for every admin panel section."""
 import json
 import logging
+import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from urllib.parse import unquote, urlsplit
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -73,9 +75,27 @@ def _int(v, default=None):
 
 
 def back(ctx, fallback="/"):
-    ref = ctx.request.headers.get("referer", "")
+    """Return to the referring page, but only to a local path on this same host."""
+    ref = urlsplit(ctx.request.headers.get("referer", ""))
     host = ctx.request.headers.get("host", "")
-    return ref if host and f"//{host}/" in ref else fallback
+    if not host or ref.scheme not in ("http", "https") or ref.netloc != host:
+        return fallback
+    path = ref.path + (f"?{ref.query}" if ref.query else "")
+    return path if safe_next(path) == path else fallback
+
+
+_NEXT_RE = re.compile(r"^/(?![/\\])[A-Za-z0-9._~!$&'()*+,;=:@/?%-]*$")
+
+
+def safe_next(value):
+    """Only same-origin absolute paths. Rejects scheme/host forms, backslashes, control characters
+    and percent-encoded slashes that some browsers or proxies normalise into a host."""
+    if not isinstance(value, str) or len(value) > 512 or not _NEXT_RE.match(value):
+        return "/"
+    decoded = unquote(value)
+    if decoded.startswith(("//", "/\\")) or "\\" in decoded or any(ord(ch) < 32 or ord(ch) == 127 for ch in decoded):
+        return "/"
+    return value
 
 
 def get_or_404(sql, *args):
@@ -134,7 +154,7 @@ def device_rows(ev=None, live=None):
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, next: str = "/"):
     tok = secrets.token_urlsafe(24)
-    resp = templates.TemplateResponse(request, "login.html", {"login_csrf": tok, "next": next, "error": None,
+    resp = templates.TemplateResponse(request, "login.html", {"login_csrf": tok, "next": safe_next(next), "error": None,
                                                               "fake": config.FAKE})
     resp.set_cookie(config.LOGIN_CSRF_COOKIE, tok, httponly=True, secure=config.SECURE_COOKIES,
                     samesite="strict", max_age=900, path="/")
@@ -147,9 +167,7 @@ async def login(request: Request):
     ip = client_ip(request)
     username = (form.get("username") or "").strip()[:64]
     password = form.get("password") or ""
-    nxt = form.get("next") or "/"
-    if not nxt.startswith("/") or nxt.startswith("//"):
-        nxt = "/"
+    nxt = safe_next(form.get("next") or "/")
 
     def fail(msg, code=400):
         tok = secrets.token_urlsafe(24)
@@ -573,8 +591,8 @@ def policy_create(ctx: Ctx = AdminPost):
     if db.q1("SELECT 1 FROM policies WHERE name = ?", name):
         return redirect("/policies", ctx, "A policy with that name exists.", "error")
     cols = ["kind", "description", "block_malware", "block_adult", "block_gambling", "block_tracking",
-            "block_encrypted_dns", "safesearch", "youtube_restricted", "enforce_schedule", "custom_block",
-            "custom_allow"]
+            "block_encrypted_dns", "block_vpn_protocols", "safesearch", "youtube_restricted", "enforce_schedule",
+            "custom_block", "custom_allow"]
     ts = db.now_iso()
     cur = db.ex(f"INSERT INTO policies(name, builtin, service_rules, extra_services, created_at, updated_at, {','.join(cols)}) "  # noqa: S608 - fixed column names/fragments only; values are bound parameters
                 f"VALUES (?,0,?,?,?,?,{','.join('?' * len(cols))})", name, json.dumps(src["service_rules"]),
@@ -612,7 +630,8 @@ def policy_save(pid: int, ctx: Ctx = AdminPost):
     new = dict(name=name, kind=kind, description=ctx.f("description")[:300],
                block_malware=ctx.checked("block_malware"), block_adult=ctx.checked("block_adult"),
                block_gambling=ctx.checked("block_gambling"), block_tracking=ctx.checked("block_tracking"),
-               block_encrypted_dns=ctx.checked("block_encrypted_dns"), safesearch=ctx.checked("safesearch"),
+               block_encrypted_dns=ctx.checked("block_encrypted_dns"),
+               block_vpn_protocols=ctx.checked("block_vpn_protocols"), safesearch=ctx.checked("safesearch"),
                youtube_restricted=ctx.checked("youtube_restricted"), enforce_schedule=ctx.checked("enforce_schedule"),
                custom_block="\n".join(block_doms), custom_allow="\n".join(allow_doms))
     db.ex(f"UPDATE policies SET {', '.join(k + '=?' for k in new)}, service_rules=?, extra_services=?, updated_at=? "  # noqa: S608 - fixed column names/fragments only; values are bound parameters

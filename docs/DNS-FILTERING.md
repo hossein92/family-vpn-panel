@@ -46,8 +46,28 @@ they win over lists); the global blocklist on the *DNS filtering* page applies t
 * nftables redirects **all** DNS (UDP/TCP 53) from the tunnel to AdGuard, so `8.8.8.8` configured on a
   device still ends up at the filter.
 * Child devices cannot reach port 853 (DNS-over-TLS / DNS-over-QUIC).
-* DNS-over-HTTPS cannot be distinguished from normal HTTPS without interception; child policies block
-  known DoH endpoints by name instead.
+* **Prevent filter bypass** (per policy) additionally:
+  * blocks known encrypted-DNS, VPN and proxy endpoints by name (the bypass list) plus privacy relay
+    services;
+  * in the firewall, rejects port 853 and all traffic to a curated set of well-known public DNS
+    resolver addresses (Cloudflare, Google, Quad9, OpenDNS, AdGuard DNS, CleanBrowsing, Mullvad,
+    DNS.SB). Those addresses serve only DNS, so no websites are affected, and plain DNS to them still
+    works because port 53 is redirected to AdGuard first. Add addresses with
+    `EXTRA_BLOCKED_RESOLVERS` in `panel.env`.
+* **Block VPN and proxy protocols** (per policy, off by default) rejects the standard ports of
+  OpenVPN, WireGuard, IPsec/IKE (incl. ESP/AH), L2TP, PPTP (incl. GRE) and SOCKS for that policy's
+  devices. It can break Wi-Fi Calling on some phones (IKE/IPsec), so enable it deliberately.
+* Devices without these options keep exactly their previous rules. Nothing blocks ordinary HTTPS.
+
+### What network-level controls cannot guarantee
+
+* Encrypted DNS or tunnels carried over ordinary HTTPS to endpoints that are not on the lists look
+  like normal web traffic and cannot be identified without TLS interception, which this project
+  deliberately does not do.
+* VPNs on non-standard ports, and newly appearing services, are not covered by port or address rules.
+* Traffic to the device's own local network never enters the tunnel, so the server never sees it.
+* Filtering applies only while the device is connected. Keeping the VPN on is a device setting (see
+  [PARENTAL-CONTROLS.md](PARENTAL-CONTROLS.md#honest-limitations)).
 
 ## Privacy
 

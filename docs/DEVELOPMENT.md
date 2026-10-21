@@ -54,6 +54,11 @@ Targets come from `/etc/vpnpanel/panel.env`. External checks can be redirected w
 `EGRESS_CHECK_URL`, `WEB_CHECK_URL`, `DOT_TEST_HOST` and `EXPECTED_EGRESS_IP` (useful in isolated
 labs). It is never run in CI.
 
+`tests/integration/lab/run-lab.sh up|e2e|drills|down` automates such a lab with Docker. It creates
+only `fvpsec-*` containers and a `203.0.113.0/24` network, installs the panel with the real installer,
+runs the integration test with lab targets, and runs lab-only drills (backup, restore, restarts,
+rollback compatibility) that must never be run on a real server.
+
 A disposable lab works well with a privileged systemd container (`ubuntu:24.04` + `systemd`,
 `--privileged --cgroupns=host --device /dev/net/tun`). Note that Docker Desktop's userspace network
 delivers packets with invalid TCP checksums, which tunnelled clients drop; attach the container to a
